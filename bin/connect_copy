@@ -1,0 +1,974 @@
+#!/bin/bash
+
+############################################################
+#
+# Copy Amazon Connect instance A to instance B safely
+#
+
+USAGE=$(cat <<EOD
+Usage: $(basename $0) [-?d] [-g cf_prefix] helper
+    Copy Amazon Connect instance A to instance B safely, based on the
+    connect_list and connect_diff results, under the helper directory
+    creating new components in helper.new, updating old components in helper.old,
+    and updating references defined in helper.sed.
+
+    helper        Name of the helper directory
+    -d            Dry run - Run through the script but not updating the target instance
+    -g cf_prefix  Only copy contact flows/modules with their name prefixed by cf_prefix
+    -?            Help
+EOD
+)
+usage() { echo -e "$USAGE" >&2; exit 2; }
+
+error() {
+    if [ -n "$1" ]; then
+        cat <<EOD
+hour_json=$hour_json
+hour_id_a=$hour_id_a
+hour_id_b=$hour_id_b
+queue_json=$queue_json
+queue_id_a=$queue_id_a
+queue_id_b=$queue_id_b
+routing_json=$routing_json
+routing_id_a=$routing_id_a
+routing_id_b=$routing_id_b
+flow_json=$flow_json
+flow_id_a=$flow_id_a
+flow_id_b=$flow_id_b
+EOD
+        echo "Error: $1" >&2
+    fi
+    exit 1
+}
+
+diff_files() {
+    # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
+    # If same, return 0. If different, show the difference unsorted,
+    # then ask if want to update. Return 1 if needs update and 0 otherwise.
+    sed -f $helper_sed $TEMPA | tee $TEMPA2 | sort > $TEMPA3
+    sort $TEMPB | diff -qbB - $TEMPA3 &> /dev/null
+    if [ $? -eq 0 ]; then
+        echo "same"
+    else
+        # sdiff $TEMPB $TEMPA2
+        echo "changed"
+    fi
+}
+
+
+TEMPFILE=$(mktemp)
+TEMPNEW=${TEMPFILE}_new
+TEMPOLD=${TEMPFILE}_old
+TEMPA=${TEMPFILE}_A
+TEMPB=${TEMPFILE}_B
+TEMPA2=${TEMPFILE}_A2
+TEMPA3=${TEMPFILE}_A3
+trap 'rm -r -- $TEMPFILE $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3' EXIT
+touch $TEMPFILE $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
+
+dryrun=
+cfPrefix=
+cfPrefixText=
+while getopts "?dg:" arg; do
+  case "$arg" in
+    d)  dryrun=on; echo "Dry Run";;
+    g)  cfPrefix=$OPTARG; cfPrefixText=" with name matching \"$cfPrefix\"";;
+    *)  usage;;
+  esac
+done
+shift $((OPTIND-1))
+
+helper=$1
+
+if [ -z "$helper" ]; then
+    usage
+fi
+
+for ext in var sed new old; do
+    eval helper_$ext=$helper/helper.$ext
+    eval fn=\$helper_$ext
+done
+
+if [ ! -s $helper_var ]; then
+    error "$helper_var does not exist. $helper is probably not a Helper directory."
+fi
+
+. $helper_var
+profile=$aws_profile_b
+profile_flag=${profile:+--profile $profile}
+
+echo "Instance Alias A: $instance_alias_a (in directory $instance_alias_dir_a)"
+echo "Instance Alias B: $instance_alias_b (in directory $instance_alias_dir_b)"
+echo "Helper Directory: $helper"
+echo "AWS Profile B in use: ${profile:-${AWS_PROFILE:-(default)}}"
+echo "Context Flow Prefix: $contact_flow_prefix"
+
+helper_older_than=
+
+if [ "$helper_var" -ot "$instance_alias_dir_a/instance.var" ]; then
+    helper_older_than="$helper_older_than $instance_alias_a"
+fi
+
+if [ "$helper_var" -ot "$instance_alias_dir_b/instance.var" ]; then
+    helper_older_than="$helper_older_than $instance_alias_b"
+fi
+
+echo helper_older_than=$helper_older_than
+
+if [ -n "$helper_older_than" ]; then
+    echo
+    error "Instances$helper_older_than updated since helper $helper was created. Please run connect_diff again."
+fi
+
+
+############################################################
+#
+# Prompts
+#
+
+cat <<EOD
+
+Prompts
+-------
+Not copying these Prompts, assumed exist or not required:
+EOD
+egrep "^prompt_" $helper_new | sort | sed -e's/_/: /'
+
+
+############################################################
+#
+# Hours of operations
+#
+
+cat <<EOD
+
+Hours of operations
+-------------------
+EOD
+# Preload as $helper_old may change
+egrep "^hour_" $helper_old > $TEMPOLD
+# Create what is in $helper_new
+egrep "^hour_" $helper_new > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No hours of operations to create"
+else
+    num_hours=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nCreating $num_hours Hours of operations"
+    ii=0
+    sort $TEMPNEW |
+    while read hour_json; do
+        ii=$[ii+1]
+        echo "$ii. $hour_json"
+        hour_name=${hour_json#hour_}
+        hour_name=${hour_name%.json}
+
+        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json")
+
+        cat "$instance_alias_dir_a/$hour_json" |
+        jq --arg iid $instance_id_b \
+            ".HoursOfOperation | del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid}" |
+            sed -f $helper_sed > "$helper/$hour_json"
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-create hours of operation
+$(cat "$helper/$hour_json")
+
+EOD
+            rm "$helper/$hour_json"
+            continue
+        fi
+
+        aws connect create-hours-of-operation \
+            --cli-input-json "file://$helper/$hour_json" \
+            $profile_flag > "$helper/output_$hour_json"
+        test $? -eq 0 || error "Line $LINENO"
+        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json")
+
+        aws connect describe-hours-of-operation \
+            --instance-id $instance_id_b \
+            --hours-of-operation-id $hour_id_b \
+            $profile_flag > "$instance_alias_dir_b/$hour_json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        # Moving hour_json from helper_new to helper_old
+        echo $hour_json >> $helper_old
+        sed -e"/$hour_json/d" $helper_new > $TEMPFILE
+        cat $TEMPFILE > $helper_new
+
+        cat <<EOD >> $helper_sed
+# Hour of operation: $hour_name
+s%$hour_id_a%$hour_id_b%g
+EOD
+    done
+    test $? -eq 0 || error
+
+    if [ -z "$dryrun" ]; then
+        # Update instance B hours
+        aws connect list-hours-of-operations \
+            --instance-id $instance_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r ".HoursOfOperationSummaryList[]" > $instance_alias_dir_b/hours.json
+    fi
+fi
+
+if [ ! -s $TEMPOLD ]; then
+    echo "No hours of operations to update"
+else
+    num_hours=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_hours hours of operations for an update"
+    ii=0
+    sort $TEMPOLD |
+    while read hour_json; do
+        ii=$[ii+1]
+        echo -n "$ii. $hour_json ... "
+        cat "$instance_alias_dir_a/$hour_json" > $TEMPA
+        cat "$instance_alias_dir_b/$hour_json" > $TEMPB
+        df=$(diff_files); echo $df; test "$df" == "same" && continue
+        echo "Updating $hour_json"
+
+        hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json")
+        arg_flags=$(cat "$instance_alias_dir_b/$hour_json" |
+            jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId")
+        cat "$instance_alias_dir_a/$hour_json" |
+        jq --arg iid $instance_id_b $arg_flags \
+            ".HoursOfOperation | del(.HoursOfOperationArn, .Tags) | . + { InstanceId: \$iid, HoursOfOperationId: \$id }" \
+            > "$helper/$hour_json"
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-update hours of operation
+$(cat "$helper/$hour_json")
+
+EOD
+            rm "$helper/$hour_json"
+            continue
+        fi
+
+        aws connect update-hours-of-operation \
+            --cli-input-json "file://$helper/$hour_json" \
+            $profile_flag > "$helper/output_$hour_json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        aws connect describe-hours-of-operation \
+            --instance-id $instance_id_b \
+            --hours-of-operation-id $hour_id_b \
+            $profile_flag > "$instance_alias_dir_b/$hour_json"
+        test $? -eq 0 || error "Line $LINENO"
+    done
+    test $? -eq 0 || error
+fi
+
+
+############################################################
+#
+# Queues
+#
+
+cat <<EOD
+
+Queues
+------
+EOD
+# Preload as $helper_old may change
+egrep "^queue_" $helper_old > $TEMPOLD
+# Create what is in $helper_new
+egrep "^queue_" $helper_new > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No queues to create"
+else
+    num_queues=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nCreating $num_queues queues"
+    ii=0
+    sort $TEMPNEW |
+    while read queue_json; do
+        ii=$[ii+1]
+        echo "$ii. $queue_json"
+        queue_name=${queue_json#queue_}
+        queue_name=${queue_name%.json}
+
+        queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json")
+
+        cat "$instance_alias_dir_a/$queue_json" |
+        jq --arg instance_id $instance_id_b \
+            ".Queue | del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status) | . + { InstanceId: \$instance_id}" |
+        sed -f $helper_sed > "$helper/$queue_json"
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-create queue
+$(cat "$helper/$queue_json")
+
+EOD
+            rm "$helper/$queue_json"
+            continue
+        fi
+
+        aws connect create-queue \
+            --cli-input-json "file://$helper/$queue_json" \
+            $profile_flag > "$helper/output_$queue_json"
+        test $? -eq 0 || error "Line $LINENO"
+        queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json")
+
+        aws connect describe-queue \
+            --instance-id $instance_id_b \
+            --queue-id $queue_id_b \
+            $profile_flag > "$instance_alias_dir_b/$queue_json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        # Moving queue_json from helper_new to helper_old
+        echo $queue_json >> $helper_old
+        sed -e"/$queue_json/d" $helper_new > $TEMPFILE
+        cat $TEMPFILE > $helper_new
+
+        cat <<EOD >> $helper_sed
+# Queue: $queue_name
+s%$queue_id_a%$queue_id_b%g
+EOD
+    done
+    test $? -eq 0 || error
+
+    if [ -z "$dryrun" ]; then
+        # Update instance B queues
+        aws connect list-queues \
+            --instance-id $instance_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r ".QueueSummaryList[] | select(.QueueType != \"AGENT\")" > $instance_alias_dir_b/queues.json
+    fi
+fi
+
+if [ ! -s $TEMPOLD ]; then
+    echo "No queues to update"
+else
+    num_queues=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_queues queues for an update"
+    ii=0
+    sort $TEMPOLD |
+    while read queue_json; do
+        ii=$[ii+1]
+        echo -n "$ii. $queue_json ... "
+        cat "$instance_alias_dir_a/$queue_json" |
+        jq "del(.Queue.OutboundCallerConfig)" > $TEMPA
+        cat "$instance_alias_dir_b/$queue_json" > $TEMPB
+        df=$(diff_files); echo $df; test "$df" == "same" && continue
+        echo "Please update $queue_json manually considering potential operation impact."
+    done
+fi
+
+
+############################################################
+#
+# Routing Profiles
+#
+
+gen_helper_rpqr() {
+    # Routing Profile Queue Reference
+    routing_name=$1
+    out_file="$helper/routingQRs_$routing_name.json"
+    cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+    jq ".RoutingProfileQueueConfigSummaryList[] |
+        { QueueReference: { QueueId, Channel }, Priority, Delay }" \
+    > "$out_file"
+    echo "$out_file"
+}
+
+gen_helper_routing_new() {
+    routing_name=$1
+    out_file="$helper/routingNew_$routing_name.json"
+    rpqr_file=$(gen_helper_rpqr "$routing_name")
+    cat "$instance_alias_dir_a/routing_$routing_name.json" |
+    jq --arg iid $instance_id_b \
+        --slurpfile rpqc "$rpqr_file" \
+        ".RoutingProfile |
+        del(.RoutingProfileId, .RoutingProfileArn) |
+        . + { InstanceId: \$iid, QueueConfigs: \$rpqc } |
+        del(.MediaConcurrencies[] | select(.Concurrency == 0))" |
+    sed -f $helper_sed > "$out_file"
+    rm "$rpqr_file"
+    echo "$out_file"
+}
+
+gen_helper_routing_old() {
+    routing_name=$1
+    out_file="$helper/routingOld_$routing_name.json"
+    rpqr_file=$(gen_helper_rpqr "$routing_name")
+    cat "$instance_alias_dir_b/routing_$routing_name.json" |
+    jq --arg iid $instance_id_b \
+        --slurpfile rpqc "$rpqr_file" \
+        ".RoutingProfile |
+        { InstanceId, RoutingProfileId, QueueConfigs: \$rpqc }" |
+    sed -f $helper_sed > "$out_file"
+    rm "$rpqr_file"
+    echo "$out_file"
+}
+
+cat <<EOD
+
+Routing Profiles
+----------------
+EOD
+# Preload as $helper_old may change
+egrep "^routing_" $helper_old > $TEMPOLD
+# Create what is in $helper_new
+egrep "^routing_" $helper_new > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No routing profiles to create"
+else
+    num_routings=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nCreating $num_routings routing profiles"
+    ii=0
+    sort $TEMPNEW |
+    while read routing_json; do
+        ii=$[ii+1]
+        echo "$ii. $routing_json"
+        routing_name=${routing_json#routing_}
+        routing_name=${routing_name%.json}
+
+        routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json")
+        routing_new_file=$(gen_helper_routing_new "$routing_name")
+        out_file="$helper/output_routing_new_$routing_name.json"
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-create routing profile
+$(cat "$routing_new_file")
+
+EOD
+            rm "$routing_new_file"
+            continue
+        fi
+
+        aws connect create-routing-profile \
+            --cli-input-json "file://$routing_new_file" \
+            $profile_flag > "$out_file"
+        test $? -eq 0 || error "Line $LINENO"
+        routing_id_b=$(jq -r ".RoutingProfileId" "$out_file")
+
+        # All routing profiles will be updated with queues
+        echo "$routing_json" >> $TEMPOLD
+
+        aws connect describe-routing-profile \
+            --instance-id $instance_id_b \
+            --routing-profile-id $routing_id_b \
+            $profile_flag > "$instance_alias_dir_b/$routing_json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        aws connect list-routing-profile-queues \
+            --instance-id $instance_id_b \
+            --routing-profile-id $routing_id_b \
+            $profile_flag > "$instance_alias_dir_b/routingQs_$routing_name.json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        # Moving routing_json from helper_new to helper_old
+        echo "$routing_json" >> $helper_old
+        sed -e"/$routing_json/d" $helper_new > $TEMPFILE
+        cat $TEMPFILE > $helper_new
+
+        cat <<EOD >> $helper_sed
+# Routing Profile: $routing_name
+s%$routing_id_a%$routing_id_b%g
+EOD
+    done
+    test $? -eq 0 || error
+
+    if [ -z "$dryrun" ]; then
+        # Update instance B routing profiles
+        aws connect list-routing-profiles \
+            --instance-id $instance_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r ".RoutingProfileSummaryList[]" > $instance_alias_dir_b/routings.json
+    fi
+fi
+
+if [ ! -s $TEMPOLD ]; then
+    echo "No routing profiles to update"
+else
+    num_routings=$(echo $(cat $TEMPOLD | wc -l))
+    # echo $num_routings existing routing profiles: not to be auto-updated due to possible operation impact
+    echo -e "\nChecking $num_routings routing profiles for an update"
+    ii=0
+    sort $TEMPOLD |
+    while read routing_json; do
+        ii=$[ii+1]
+        echo -n "$ii. $routing_json ... "
+        routing_name=${routing_json#routing_}
+        routing_name=${routing_name%.json}
+
+        cat "$instance_alias_dir_a/$routing_json" |
+        jq "del(.RoutingProfile.MediaConcurrencies[] | select(.Concurrency == 0))" > $TEMPA
+        cat "$instance_alias_dir_b/$routing_json" |
+        jq "del(.RoutingProfile.MediaConcurrencies[] | select(.Concurrency == 0))" > $TEMPB
+        # df=$(diff_files); echo $df; test "$df" == "same" && continue
+        df_r=$(diff_files)
+
+        cat "$instance_alias_dir_a/routingQs_$routing_name.json" > $TEMPA
+        cat "$instance_alias_dir_b/routingQs_$routing_name.json" > $TEMPB
+        # df=$(diff_files); echo $df; test "$df" == "same" && continue
+        df_rq=$(diff_files)
+
+        if [ "$df_r" == "same" -a "$df_rq" == "same" ]; then
+            echo same
+            continue
+        fi
+
+        echo " routing $df_r routing-queues $df_rq"
+        echo "Updating $routing_json"
+
+        # routing_old_file=$(gen_helper_routing_old "$routing_name")
+        routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json")
+
+        if [ "$df_r" != "same" ]; then
+            # Update Routing Profile of Instance B ahead of time
+            # then update the concurrency and default-outbound-queue.
+            # (The name must have already matched.)
+            if [ -z "$dryrun" ]; then
+                cat "$instance_alias_dir_a/$routing_json" |
+                sed -f $helper_sed > "$instance_alias_dir_b/$routing_json"
+            fi
+
+            routing_doq_b=$(cat "$instance_alias_dir_b/$routing_json" |
+                jq -r ".RoutingProfile.DefaultOutboundQueueId")
+
+            cat "$instance_alias_dir_b/$routing_json" |
+            jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" |
+            jq -s > "$helper/routingConcurrency_$routing_name.json"
+
+            if [ -n "$dryrun" ]; then
+                cat << EOD
+Dry-update routing profile default outbound queue to "$routing_doq_b"
+Dry-update routing profile concurrency
+$(cat "$helper/routingConcurrency_$routing_name.json")
+
+EOD
+                rm "$helper/routingConcurrency_$routing_name.json"
+            else
+                aws connect update-routing-profile-default-outbound-queue \
+                    --instance-id $instance_id_b \
+                    --routing-profile-id $routing_id_b \
+                    --default-outbound-queue-id $routing_doq_b \
+                    $profile_flag
+
+                aws connect update-routing-profile-concurrency \
+                    --instance-id $instance_id_b \
+                    --routing-profile-id $routing_id_b \
+                    --media-concurrencies "file://$helper/routingConcurrency_$routing_name.json" \
+                    $profile_flag
+
+                aws connect describe-routing-profile \
+                    --instance-id $instance_id_b \
+                    --routing-profile-id $routing_id_b \
+                    $profile_flag > "$instance_alias_dir_b/$routing_json"
+                test $? -eq 0 || error "Line $LINENO"
+            fi
+        fi
+
+        if [ "$df_rq" != "same" ]; then
+
+            cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
+                sort -u > $TEMPA
+            cat "$instance_alias_dir_b/routingQs_$routing_name.json" |
+                jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
+                sort -u > $TEMPB
+            > $TEMPA2
+            diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" |
+            tee $TEMPA3 |
+            while read q_name; do
+                cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"$q_name\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
+            done
+            cat $TEMPA2 | sed -f $helper_sed | jq -s > $TEMPFILE
+            if [ -n "$dryrun" ]; then
+                cat << EOD
+Dry-associate queues to routing profile $routing_name:
+$(cat $TEMPA3)
+$(cat $TEMPFILE)
+
+EOD
+            else
+                cat $TEMPA3
+                aws connect associate-routing-profile-queues \
+                    --instance-id $instance_id_b \
+                    --routing-profile-id $routing_id_b \
+                    --queue-configs "file://$TEMPFILE" \
+                    $profile_flag
+                test $? -eq 0 || error "Line $LINENO"
+
+                aws connect list-routing-profile-queues \
+                    --instance-id $instance_id_b \
+                    --routing-profile-id $routing_id_b \
+                    $profile_flag > "$instance_alias_dir_b/routingQs_$routing_name.json"
+                test $? -eq 0 || error "Line $LINENO"
+            fi
+        fi
+    done
+    test $? -eq 0 || error
+fi
+
+
+############################################################
+#
+# Contact Flow Modules
+#
+
+cat <<EOD
+
+Contact Flow Modules Creation
+-----------------------------
+EOD
+
+# Preload as $helper_old may change
+egrep "^module_$cfPrefix" $helper_old > $TEMPOLD
+# Create what is in $helper_new
+egrep "^module_$cfPrefix" $helper_new > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No contact flow modules$cfPrefixText to create"
+else
+    num_modules=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nCreating $num_modules contact flow modules$cfPrefixText"
+    ii=0
+    sort $TEMPNEW |
+    while read module_json; do
+        ii=$[ii+1]
+        echo "$ii. $module_json"
+        module_name=${module_json#module_}
+        module_name=${module_name%.json}
+
+        module_id_a=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_a/modules.json")
+        out_file="$helper/output_$module_json"
+
+        # Contact Flow Module template file
+        # module_template_file=$helper/module_template.json
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-create contact flow module from Template
+--instance-id $instance_id_b
+--name "$module_name"
+
+EOD
+            continue
+        fi
+
+        cat "$instance_alias_dir_a/$module_json" |
+        sed -f $helper_sed > "$helper/$module_json"
+
+            # --content "file://$module_template_file" \
+        aws connect create-contact-flow-module \
+            --instance-id $instance_id_b \
+            --name "$module_name" \
+            --content "file://$helper/$module_json" \
+            $profile_flag > "$out_file"
+        test $? -eq 0 || error "Line $LINENO"
+        module_id_b=$(jq -r ".Id" "$out_file")
+
+        # All flows will be updated with content
+        # echo "$module_json" >> $TEMPOLD
+
+        aws connect describe-contact-flow-module \
+            --instance-id $instance_id_b \
+            --contact-flow-module-id $module_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
+
+        # Moving module_json from helper_new to helper_old
+        echo "$module_json" >> $helper_old
+        sed -e"/$module_json/d" $helper_new > $TEMPFILE
+        cat $TEMPFILE > $helper_new
+
+        cat <<EOD >> $helper_sed
+# Contact Flow Module: $module_name
+s%$module_id_a%$module_id_b%g
+EOD
+    done
+    test $? -eq 0 || error
+
+    if [ -z "$dryrun" ]; then
+        # Update instance B flow modules
+        aws connect list-contact-flow-modules \
+            --instance-id $instance_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r ".ContactFlowModulesSummaryList[] | select(.Name | test(\"^($contact_flow_prefix).*\"))" \
+        > $instance_alias_dir_b/modules.json
+    fi
+fi
+
+
+cat <<EOD
+
+Contact Flow Modules Update
+---------------------------
+EOD
+
+if [ ! -s $TEMPOLD ]; then
+    echo "No contact flow modules to update"
+else
+    num_modules=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_modules contact flow modules$cfPrefixText for an update"
+    ii=0
+    sort $TEMPOLD |
+    while read module_json; do
+        ii=$[ii+1]
+        echo -n "$ii. $module_json ... "
+        module_name=${module_json#module_}
+        module_name=${module_name%.json}
+
+        module_id_b=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_b/modules.json")
+
+        cat "$instance_alias_dir_a/$module_json" > $TEMPA
+        cat "$instance_alias_dir_b/$module_json" > $TEMPB
+        df=$(diff_files); echo $df; test "$df" == "same" && continue
+
+        cat "$instance_alias_dir_a/$module_json" |
+        sed -f $helper_sed > "$helper/$module_json"
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-update contact flow module
+--instance-id $instance_id_b
+--contact-flow-module-id $module_id_b
+
+EOD
+            rm "$helper/$module_json"
+            continue
+        fi
+
+        aws connect update-contact-flow-module-content \
+            --instance-id $instance_id_b \
+            --contact-flow-module-id $module_id_b \
+            --content "file://$helper/$module_json" \
+            $profile_flag > "$helper/output_content_$module_json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        aws connect describe-contact-flow-module \
+            --instance-id $instance_id_b \
+            --contact-flow-module-id $module_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
+    done
+    test $? -eq 0 || error
+fi
+
+
+
+############################################################
+#
+# Contact Flows
+#
+# TODO:
+#   - Use $helper/flow_template.json as a template to create new contact flows
+#   - Use the Default special type contact flow to create special type contact flows
+#   - Skip "Default " and "Sample " contact flows
+
+cat <<EOD
+
+Contact Flows Creation
+----------------------
+EOD
+
+# Preload as $helper_old may change
+egrep "^flow_$cfPrefix" $helper_old | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
+# Create what is in $helper_new
+egrep "^flow_$cfPrefix" $helper_new > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No contact flows$cfPrefixText to create"
+else
+    num_flows=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nCreating $num_flows contact flows$cfPrefixText"
+    ii=0
+    sort $TEMPNEW |
+    while read flow_json; do
+        ii=$[ii+1]
+        echo "$ii. $flow_json"
+        flow_name=${flow_json#flow_}
+        flow_name=${flow_name%.json}
+        flow_type=$(jq -r "select(.Name == \"$flow_name\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
+        flow_id_a=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_a/flows.json")
+        out_file="$helper/output_$flow_json"
+
+        # Contact Flow template file
+        flow_template_file=$helper/flow_template.json
+        case "$flow_type" in
+        CUSTOMER_QUEUE)
+            flow_template_file="$instance_alias_dir_b/flow_Default customer queue.json";;
+        CUSTOMER_HOLD)
+            flow_template_file="$instance_alias_dir_b/flow_Default customer hold.json";;
+        CUSTOMER_WHISPER)
+            flow_template_file="$instance_alias_dir_b/flow_Default customer whisper.json";;
+        AGENT_HOLD)
+            flow_template_file="$instance_alias_dir_b/flow_Default agent hold.json";;
+        AGENT_WHISPER)
+            flow_template_file="$instance_alias_dir_b/flow_Default agent whisper.json";;
+        OUTBOUND_WHISPER)
+            flow_template_file="$instance_alias_dir_b/flow_Default outbound.json";;
+        AGENT_TRANSFER)
+            flow_template_file="$instance_alias_dir_b/flow_Default agent transfer.json";;
+        QUEUE_TRANSFER)
+            flow_template_file="$instance_alias_dir_b/flow_Default queue transfer.json";;
+        esac
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-create contact flow from Template (Default flows)
+--instance-id $instance_id_b
+--name "$flow_name"
+--type $flow_type
+
+EOD
+            continue
+        fi
+
+        aws connect create-contact-flow \
+            --instance-id $instance_id_b \
+            --name "$flow_name" \
+            --type $flow_type \
+            --content "file://$flow_template_file" \
+            $profile_flag > "$out_file"
+        test $? -eq 0 || error "Line $LINENO"
+        flow_id_b=$(jq -r ".ContactFlowId" "$out_file")
+
+        # All flows will be updated with content
+        echo "$flow_json" >> $TEMPOLD
+
+        aws connect describe-contact-flow \
+            --instance-id $instance_id_b \
+            --contact-flow-id $flow_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
+
+        # Moving flow_json from helper_new to helper_old
+        echo "$flow_json" >> $helper_old
+        sed -e"/$flow_json/d" $helper_new > $TEMPFILE
+        cat $TEMPFILE > $helper_new
+
+        cat <<EOD >> $helper_sed
+# Contact Flow: $flow_name
+s%$flow_id_a%$flow_id_b%g
+EOD
+    done
+    test $? -eq 0 || error
+
+    if [ -z "$dryrun" ]; then
+        # Update instance B flows
+        aws connect list-contact-flows \
+            --instance-id $instance_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r ".ContactFlowSummaryList[] | select(.Name | test(\"^($contact_flow_prefix).*\"))" \
+        > $instance_alias_dir_b/flows.json
+    fi
+fi
+
+
+cat <<EOD
+
+Contact Flows Update
+--------------------
+EOD
+
+if [ ! -s $TEMPOLD ]; then
+    echo "No contact flows to update"
+else
+    num_flows=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_flows contact flows$cfPrefixText for an update"
+    ii=0
+    sort $TEMPOLD |
+    while read flow_json; do
+        ii=$[ii+1]
+        echo -n "$ii. $flow_json ... "
+        flow_name=${flow_json#flow_}
+        flow_name=${flow_name%.json}
+        flow_id_b=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_b/flows.json")
+
+        cat "$instance_alias_dir_a/$flow_json" > $TEMPA
+        cat "$instance_alias_dir_b/$flow_json" > $TEMPB
+        df=$(diff_files); echo $df; test "$df" == "same" && continue
+
+        cat "$instance_alias_dir_a/$flow_json" |
+        sed -f $helper_sed > "$helper/$flow_json"
+
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-update contact flow
+--instance-id $instance_id_b
+--contact-flow-id $flow_id_b
+
+EOD
+            rm "$helper/$flow_json"
+            continue
+        fi
+
+        aws connect update-contact-flow-content \
+            --instance-id $instance_id_b \
+            --contact-flow-id $flow_id_b \
+            --content "file://$helper/$flow_json" \
+            $profile_flag > "$helper/output_content_$flow_json"
+        test $? -eq 0 || error "Line $LINENO"
+
+        aws connect describe-contact-flow \
+            --instance-id $instance_id_b \
+            --contact-flow-id $flow_id_b \
+            $profile_flag > $TEMPFILE
+        test $? -eq 0 || error "Line $LINENO"
+        cat $TEMPFILE |
+        jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
+    done
+    test $? -eq 0 || error
+fi
+
+
+############################################################
+#
+# Contact flows and modules association with Lambda functions
+#
+
+lambdaArnLead=arn:aws:lambda:$region_b:$aws_ac_b:function:
+cat \
+    "$instance_alias_dir_b/flow_${contact_flow_prefix}"* \
+    "$instance_alias_dir_b/module_${contact_flow_prefix}"* 2> /dev/null |
+    jq -r ".Actions[] | select(.Type == \"InvokeLambdaFunction\") | .Parameters.LambdaFunctionARN" |
+    grep "$lambdaArnLead" |
+    sort -u > $TEMPFILE
+
+if [ -s $TEMPFILE ]; then
+    echo
+    echo Associating Lambda functions to $instance_alias_b
+    ii=0
+    cat $TEMPFILE |
+    while read lambdaArn; do
+        ii=$[ii+1]
+        echo "$ii. $lambdaArn"
+        if [ -n "$dryrun" ]; then
+            cat << EOD
+Dry-associating lambda function
+--instance-id $instance_id_b \
+--function-arn $lambdaArn \
+
+
+EOD
+            continue
+        fi
+        aws connect associate-lambda-function \
+            --instance-id $instance_id_b \
+            --function-arn $lambdaArn \
+            $profile_flag
+    done
+fi
+
+echo
+echo All done
