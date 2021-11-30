@@ -25,6 +25,10 @@ fix_module_json() {
     # A workaround for AWS CLI failed to create contact flow modules
     # with Transitions Errors and Conditions in the EndFlowModuleExecution block.
     module_json=$1
+    x=$(jq -r ".Actions[] | select(.Type == \"EndFlowModuleExecution\") | .Transitions" "$module_json")
+    if [ "$x" == "{}" ]; then
+        return
+    fi
     ii=0
     cat "$module_json" > $TEMPFILE
     cat "$TEMPFILE" |
