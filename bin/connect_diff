@@ -33,7 +33,7 @@ add_file() {
     file_suffix="$2"
     helper_file="$3"
     if [ ! -s "$alias_dir/$file_suffix" ]; then
-        error "ERROR: File missing or empty: $alias_dir/$file_suffix"
+        error "Error: File missing or empty: $alias_dir/$file_suffix"
         exit 1
     else
         echo "$file_suffix" >> $helper_file

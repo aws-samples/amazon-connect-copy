@@ -36,7 +36,7 @@ flow_json=$flow_json
 flow_id_a=$flow_id_a
 flow_id_b=$flow_id_b
 EOD
-        echo "Error: $1" >&2
+        echo -e "Error: $1" >&2
     fi
     exit 1
 }
@@ -65,6 +65,8 @@ TEMPA2=${TEMPFILE}_A2
 TEMPA3=${TEMPFILE}_A3
 trap 'rm -r -- $TEMPFILE $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3' EXIT
 touch $TEMPFILE $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
+
+warning_awscli="Please install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 
 dryrun=
 cfPrefix=
@@ -182,14 +184,14 @@ EOD
         aws connect create-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             $profile_flag > "$helper/output_$hour_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json")
 
         aws connect describe-hours-of-operation \
             --instance-id $instance_id_b \
             --hours-of-operation-id $hour_id_b \
             $profile_flag > "$instance_alias_dir_b/$hour_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         # Moving hour_json from helper_new to helper_old
         echo $hour_json >> $helper_old
@@ -208,7 +210,7 @@ EOD
         aws connect list-hours-of-operations \
             --instance-id $instance_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r ".HoursOfOperationSummaryList[]" > $instance_alias_dir_b/hours.json
     fi
@@ -250,13 +252,13 @@ EOD
         aws connect update-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             $profile_flag > "$helper/output_$hour_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         aws connect describe-hours-of-operation \
             --instance-id $instance_id_b \
             --hours-of-operation-id $hour_id_b \
             $profile_flag > "$instance_alias_dir_b/$hour_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
     done
     test $? -eq 0 || error
 fi
@@ -309,14 +311,14 @@ EOD
         aws connect create-queue \
             --cli-input-json "file://$helper/$queue_json" \
             $profile_flag > "$helper/output_$queue_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json")
 
         aws connect describe-queue \
             --instance-id $instance_id_b \
             --queue-id $queue_id_b \
             $profile_flag > "$instance_alias_dir_b/$queue_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         # Moving queue_json from helper_new to helper_old
         echo $queue_json >> $helper_old
@@ -335,7 +337,7 @@ EOD
         aws connect list-queues \
             --instance-id $instance_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r ".QueueSummaryList[] | select(.QueueType != \"AGENT\")" > $instance_alias_dir_b/queues.json
     fi
@@ -445,7 +447,7 @@ EOD
         aws connect create-routing-profile \
             --cli-input-json "file://$routing_new_file" \
             $profile_flag > "$out_file"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         routing_id_b=$(jq -r ".RoutingProfileId" "$out_file")
 
         # All routing profiles will be updated with queues
@@ -455,13 +457,13 @@ EOD
             --instance-id $instance_id_b \
             --routing-profile-id $routing_id_b \
             $profile_flag > "$instance_alias_dir_b/$routing_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         aws connect list-routing-profile-queues \
             --instance-id $instance_id_b \
             --routing-profile-id $routing_id_b \
             $profile_flag > "$instance_alias_dir_b/routingQs_$routing_name.json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         # Moving routing_json from helper_new to helper_old
         echo "$routing_json" >> $helper_old
@@ -480,7 +482,7 @@ EOD
         aws connect list-routing-profiles \
             --instance-id $instance_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r ".RoutingProfileSummaryList[]" > $instance_alias_dir_b/routings.json
     fi
@@ -564,7 +566,7 @@ EOD
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
                     $profile_flag > "$instance_alias_dir_b/$routing_json"
-                test $? -eq 0 || error "Line $LINENO"
+                test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
             fi
         fi
 
@@ -598,13 +600,13 @@ EOD
                     --routing-profile-id $routing_id_b \
                     --queue-configs "file://$TEMPFILE" \
                     $profile_flag
-                test $? -eq 0 || error "Line $LINENO"
+                test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
                 aws connect list-routing-profile-queues \
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
                     $profile_flag > "$instance_alias_dir_b/routingQs_$routing_name.json"
-                test $? -eq 0 || error "Line $LINENO"
+                test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
             fi
         fi
     done
@@ -665,7 +667,7 @@ EOD
             --name "$module_name" \
             --content "file://$helper/$module_json" \
             $profile_flag > "$out_file"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         module_id_b=$(jq -r ".Id" "$out_file")
 
         # All flows will be updated with content
@@ -675,7 +677,7 @@ EOD
             --instance-id $instance_id_b \
             --contact-flow-module-id $module_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
 
@@ -696,7 +698,7 @@ EOD
         aws connect list-contact-flow-modules \
             --instance-id $instance_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r ".ContactFlowModulesSummaryList[] | select(.Name | test(\"^($contact_flow_prefix).*\"))" \
         > $instance_alias_dir_b/modules.json
@@ -748,13 +750,13 @@ EOD
             --contact-flow-module-id $module_id_b \
             --content "file://$helper/$module_json" \
             $profile_flag > "$helper/output_content_$module_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         aws connect describe-contact-flow-module \
             --instance-id $instance_id_b \
             --contact-flow-module-id $module_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
     done
@@ -836,7 +838,7 @@ EOD
             --type $flow_type \
             --content "file://$flow_template_file" \
             $profile_flag > "$out_file"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         flow_id_b=$(jq -r ".ContactFlowId" "$out_file")
 
         # All flows will be updated with content
@@ -846,7 +848,7 @@ EOD
             --instance-id $instance_id_b \
             --contact-flow-id $flow_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
 
@@ -867,7 +869,7 @@ EOD
         aws connect list-contact-flows \
             --instance-id $instance_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r ".ContactFlowSummaryList[] | select(.Name | test(\"^($contact_flow_prefix).*\"))" \
         > $instance_alias_dir_b/flows.json
@@ -918,13 +920,13 @@ EOD
             --contact-flow-id $flow_id_b \
             --content "file://$helper/$flow_json" \
             $profile_flag > "$helper/output_content_$flow_json"
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
         aws connect describe-contact-flow \
             --instance-id $instance_id_b \
             --contact-flow-id $flow_id_b \
             $profile_flag > $TEMPFILE
-        test $? -eq 0 || error "Line $LINENO"
+        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
     done

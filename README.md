@@ -211,6 +211,10 @@ Example:
 
 ## Useful Tips
 
+- This script has been tested with AWS CLI 2.4.1, which supports the latest
+  Amazon Connect features, including Contact Flow Modules.
+  (Even your instances may not be using all latest Amazon Connect features,
+  the script will check them and therefore require the latest AWS CLI.)
 - Make sure both the source instance and the target instance remain unaltered
   by anyone during the entire copying process (save, diff and copy).
 - `connect_diff` only creates the helper directory and will not change anything
@@ -226,3 +230,6 @@ Example:
 - If relative paths are specified in instance aliases, make sure you are running
   `connect_diff` and `connect_copy` from the same directory, so that `connect_copy`
   will resolve the relative paths correctly.
+- The Connect-Copy script does not affect any instance-specific settings outside of
+  the Amazon Connect console, such as
+  [Amazon Connect service quotas](https://docs.aws.amazon.com/connect/latest/adminguide/amazon-connect-service-limits.html).
