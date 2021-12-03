@@ -26,14 +26,14 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 
-error() { echo "$*" >&2; exit 1; }
+error() { echo -e "Error: $1" >&2; exit 1; }
 
 add_file() {
     alias_dir="$1"
     file_suffix="$2"
     helper_file="$3"
     if [ ! -s "$alias_dir/$file_suffix" ]; then
-        error "Error: File missing or empty: $alias_dir/$file_suffix"
+        error "File missing or empty: $alias_dir/$file_suffix"
         exit 1
     else
         echo "$file_suffix" >> $helper_file
@@ -72,7 +72,6 @@ if [ -d $helper ]; then
 fi
 
 routing_profile_to_ignore="Basic Routing Profile"
-# module_template=$helper/module_template.json
 flow_template=$helper/flow_template.json
 
 cat <<EOD
@@ -90,8 +89,8 @@ if [ ! -d "$instance_alias_dir_b" ]; then
     errorMsg="$errorMsg $instance_alias_dir_b"
 fi
 if [ -n "$errorMsg" ]; then
-    errorMsg="Error: Cannot find instance directories:$errorMsg"
-    error $errorMsg
+    errorMsg="Cannot find instance directories:$errorMsg"
+    error "$errorMsg"
 fi
 
 mkdir -p $helper
@@ -275,52 +274,6 @@ EOD
 done
 test $? -eq 0 || error
 
-# cat > $module_template <<EOD
-# {
-#     "Version": "2019-10-30",
-#     "StartAction": "a47b05b9-2a3f-4bb7-b724-c967ba056e6a",
-#     "Metadata": {
-#         "entryPointPosition": {
-#             "x": 20,
-#             "y": 20
-#         },
-#         "snapToGrid": false,
-#         "ActionMetadata": {
-#             "a47b05b9-2a3f-4bb7-b724-c967ba056e6a": {
-#                 "position": {
-#                     "x": 161,
-#                     "y": 22
-#                 }
-#             }
-#         }
-#     },
-#     "Actions": [
-#         {
-#             "Identifier": "a47b05b9-2a3f-4bb7-b724-c967ba056e6a",
-#             "Type": "EndFlowModuleExecution",
-#             "Parameters": {},
-#             "Transitions": {}
-#         }
-#     ],
-#     "Settings": {
-#         "InputParameters": [],
-#         "OutputParameters": [],
-#         "Transitions": [
-#             {
-#                 "DisplayName": "Success",
-#                 "ReferenceName": "Success",
-#                 "Description": ""
-#             },
-#             {
-#                 "DisplayName": "Error",
-#                 "ReferenceName": "Error",
-#                 "Description": ""
-#             }
-#         ]
-#     }
-# }
-# EOD
-
 
 ############################################################
 #
@@ -377,7 +330,6 @@ echo "$helper_var: About the source and target Amazon Connect instances"
 echo "$helper_new: Components to add to $instance_alias_dir_b"
 echo "$helper_old: Components to update for $instance_alias_dir_b based on $instance_alias_dir_a"
 echo "$helper_sed: SED script used to update components"
-# echo "$module_template: Contact Flow Module template json"
 echo "$flow_template: Contact Flow template json"
 echo
 echo "All done"

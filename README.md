@@ -3,10 +3,10 @@
 The Connect-Copy script copies components from the source Amazon Connect instance
 to the target instance safely, fixing all internal references.
 
-You may use Connect-Copy to deploy an Amazon Connect instance across environments,
-or to save a backup copy of the instance for restoration when required,
-reducing an hours-long error-prone manual job to few minutes of automated
-and reliable processing.
+You may use Connect-Copy to deploy an Amazon Connect instance across environments
+(AWS accounts or regions), or to save a backup copy of the instance for restoration
+when required, reducing an hours-long error-prone manual job to few minutes of
+automated and reliable processing.
 
 Ids and Arns of components copied from the source instance will be re-mapped to
 their corresponding components in the new instance, including:
