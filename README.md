@@ -43,20 +43,20 @@ specific components with their individual Contact Centre Codes (CCC).
 - Install [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
   - Recommend installing the latest version of AWS CLI.
 - Install [jq](https://stedolan.github.io/jq/) (if not already installed on your platform).
-- Copy bin/* to your Shell search path (e.g., /usr/local/bin).
+- Copy `bin/*` to your Shell search path (e.g., `cp bin/* /usr/local/bin/`).
 
 ## Example
 
 **Please replace names in the example with names specific to your use case.**
 
 ```
-bin/connect_save -f -G zz source-connect source-profile
-bin/connect_save -f -G zz target-connect target-profile
-bin/connect_diff -f source-connect target-connect target-helper source- target-
+connect_save -f -G zz source-connect source-profile
+connect_save -f -G zz target-connect target-profile
+connect_diff -f source-connect target-connect target-helper source- target-
 # Dry run
-bin/connect_copy -g CCC -d target-helper
+connect_copy -g CCC -d target-helper
 # Real run
-bin/connect_copy -g CCC target-helper
+connect_copy -g CCC target-helper
 ```
 
 In this example:
@@ -103,13 +103,10 @@ Note: All names in Amazon Connect are case sensitive.
   - `<target_profile>` for the target instance
   - This step is optional if your default profile already has access to both
     the source and the target instances. If not sure, skip this step for now.
-    You only need to set up the profiles if `bin/connect_save` or `bin/connect_copy`
+    You only need to set up the profiles if `connect_save` or `connect_copy`
     fail due to a permission error.
 - `cd` to an empty working directory (e.g., `md <dir>; cd <dir>`).
-- Unpack the Amazon-Connect-Copy scripts into the clean working directory.
-  - Alternatively, you can copy the scripts under `bin/` to your PATH
-    so you don't need to include `bin/` in each command.
-- Optionally, run `bin/connect_save` with no arguments to show the help message:
+- Optionally, run `connect_save` with no arguments to show the help message:
   ```
   Usage: connect_save [-?f] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
       Retrieve resources from an Amazon Connect instance into plain files
@@ -121,9 +118,9 @@ Note: All names in Amazon Connect are case sensitive.
       -G ignore_prefix     Ignore queues, routing profiles or flows/modules with names prefixed by ignore_prefix
       -?                   Help
   ```
-- Run `bin/connect_save <source_instance_alias> <source_profile>` .
-- Run `bin/connect_save <target_instance_alias> <target_profile>` .
-- Optionally, run `bin/connect_diff` with no arguments to show the help message:
+- Run `connect_save <source_instance_alias> <source_profile>` .
+- Run `connect_save <target_instance_alias> <target_profile>` .
+- Optionally, run `connect_diff` with no arguments to show the help message:
   ```
   Usage: connect_diff [-?f] instance_alias_a instance_alias_b helper [lambda_prefix_a] [lambda_prefix_b]
       Based on connect_list result on Amazon Connect instance A and B,
@@ -150,7 +147,7 @@ Note: All names in Amazon Connect are case sensitive.
     (so target components will not refer to any components in the source)
   - `helper.var` - variables of the two instances
     (instance A is the source, and instance B is the target)
-- Optionally, run `bin/connect_copy` with no arguments to show the help message:
+- Optionally, run `connect_copy` with no arguments to show the help message:
   ```
   Usage: connect_copy [-?d] [-g cf_prefix] helper
       Copy Amazon Connect instance A to instance B safely, based on the
@@ -189,24 +186,24 @@ You may restore an Amazon Connect instance from a previous backup copy saved by 
 Example:
 - Save a backup copy of the Amazon Connect instance.
   ```
-  bin/connect_save <backup_dir>/<connect_instance_alias> <profile>
+  connect_save <backup_dir>/<connect_instance_alias> <profile>
   ```
 - Restore the same instance from the backup copy.
   - Save the current copy (the one to be restored).
     ```
-    bin/connect_save <working_dir>/<connect_instance_alias> <profile>
+    connect_save <working_dir>/<connect_instance_alias> <profile>
     ```
   - Diff the current copy with the backup copy.
     ```
-    bin/connect_diff <backup_dir>/<connect_instance_alias> <working_dir>/<connect_instance_alias> <helper_dir>
+    connect_diff <backup_dir>/<connect_instance_alias> <working_dir>/<connect_instance_alias> <helper_dir>
     ```
   - Optionally, dry run to verify restoration changes.
     ```
-    bin/connect_copy -d <helper_dir>
+    connect_copy -d <helper_dir>
     ```
   - Restore the instance.
     ```
-    bin/connect_copy <helper_dir>
+    connect_copy <helper_dir>
     ```
 
 ## Useful Tips
@@ -226,7 +223,7 @@ Example:
   - If you want to keep a backup of the target instance after copying,
     run `connect_save` again on the target instance.
 - `connect_diff` and `connect_copy` do not change the source instance directory,
-  so it can be served as a backup.
+  so it can be served as a backup or as a source to copy to multiple target instances.
 - If relative paths are specified in instance aliases, make sure you are running
   `connect_diff` and `connect_copy` from the same directory, so that `connect_copy`
   will resolve the relative paths correctly.
