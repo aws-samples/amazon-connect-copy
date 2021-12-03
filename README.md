@@ -1,9 +1,9 @@
-# Connect-Copy Notes
+# Amazon-Connect-Copy User Guide
 
-The Connect-Copy script copies components from the source Amazon Connect instance
+The Amazon-Connect-Copy script copies components from the source Amazon Connect instance
 to the target instance safely, fixing all internal references.
 
-You may use Connect-Copy to deploy an Amazon Connect instance across environments
+You may use Amazon-Connect-Copy to deploy an Amazon Connect instance across environments
 (AWS accounts or regions), or to save a backup copy of the instance for restoration
 when required, reducing an hours-long error-prone manual job to few minutes of
 automated and reliable processing.
@@ -20,7 +20,7 @@ their corresponding components in the new instance, including:
 - Contact flow modules
 - Contact flows
 
-These components are not modified by Connect-Copy (to avoid any impact on
+These components are not modified by Amazon-Connect-Copy (to avoid any impact on
 other contact centres that may happen to be using the same target instance):
 
 - Users (agents) related settings
@@ -33,7 +33,7 @@ other contact centres that may happen to be using the same target instance):
   - Note: Settings for new queues will still be copied
 
 Considering the target instance may accommodate multiple contact centres,
-Connect-Copy does not remove any target instance components which are
+Amazon-Connect-Copy does not remove any target instance components which are
 not found in the source instance. If there are multiple contact centres sharing
 the same Amazon Connect instance, it is a good practice to prefix contact centre
 specific components with their individual Contact Centre Codes (CCC).
@@ -106,7 +106,7 @@ Note: All names in Amazon Connect are case sensitive.
     You only need to set up the profiles if `bin/connect_save` or `bin/connect_copy`
     fail due to a permission error.
 - `cd` to an empty working directory (e.g., `md <dir>; cd <dir>`).
-- Unpack the Connect-Copy scripts into the clean working directory.
+- Unpack the Amazon-Connect-Copy scripts into the clean working directory.
   - Alternatively, you can copy the scripts under `bin/` to your PATH
     so you don't need to include `bin/` in each command.
 - Optionally, run `bin/connect_save` with no arguments to show the help message:
@@ -182,7 +182,7 @@ Note: All names in Amazon Connect are case sensitive.
     - Outbound caller ID number
     - Outbound whisper flow
 
-## Backup an Amazon Connect instance using Connect-Copy
+## Backup an Amazon Connect instance using Amazon-Connect-Copy
 
 You may restore an Amazon Connect instance from a previous backup copy saved by `connect_save`.
 
@@ -230,6 +230,6 @@ Example:
 - If relative paths are specified in instance aliases, make sure you are running
   `connect_diff` and `connect_copy` from the same directory, so that `connect_copy`
   will resolve the relative paths correctly.
-- The Connect-Copy script does not affect any instance-specific settings outside of
+- The Amazon-Connect-Copy script does not affect any instance-specific settings outside of
   the Amazon Connect console, such as
   [Amazon Connect service quotas](https://docs.aws.amazon.com/connect/latest/adminguide/amazon-connect-service-limits.html).
