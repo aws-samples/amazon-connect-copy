@@ -13,7 +13,7 @@ Usage: connect_save [-?f] [-G ignore_prefix] instance_alias [aws_profile] [conta
     profile              AWS Profile to use
     contact_flow_prefix  Prefix of Contact Flows and Modules of interest (all others will be ignored)
     -f                   Force removal of existing instance_alias directory
-    -G ignore_prefix     Ignore queues, routing profiles or flows/modules with names prefixed by ignore_prefix
+    -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with name prefixed with ignore_prefix
     -?                   Help
 EOD
 )
@@ -51,11 +51,16 @@ touch $TEMPFILE $TEMPFILE2
 warning_awscli="Please install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 
 forced=
+ignore_prefix=
 jq_prefix_filter=
+jq_prefix_filter_text=
 while getopts "?fG:" arg; do
   case "$arg" in
     f)  forced=on;;
-    G)  jq_prefix_filter=" | select(.Name | test(\"^($OPTARG)\") | not)";;
+    G)  ignore_prefix=$OPTARG
+        jq_prefix_filter=" | select(.Name | test(\"^($ignore_prefix)\") | not)"
+        jq_prefix_filter_text=" excluding those with name prefixed with \"$ignore_prefix\""
+        ;;
     *)  usage;;
   esac
 done
@@ -67,7 +72,8 @@ profile=$2
 profile_flag=${profile:+--profile $profile}
 
 contact_flow_prefix=$3
-contact_flow_prefix_filter=${contact_flow_prefix:+" | select(.Name | test(\"^($contact_flow_prefix).*\"))"}
+contact_flow_prefix_filter=${contact_flow_prefix:+" | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))"}
+contact_flow_prefix_text="${contact_flow_prefix:+ with name prefixed with \"$contact_flow_prefix\"}"
 
 if [ -z "$instance_alias_dir" ]; then
     usage
@@ -87,6 +93,10 @@ Instance Alias: $instance_alias (in directory $instance_alias_dir)
 AWS Profile: ${profile:-${AWS_PROFILE:-(default)}}
 Contact Flow Prefix: $contact_flow_prefix
 EOD
+
+if [ -n "$ignore_prefix" ]; then
+    echo "Ignore components with prefix: $ignore_prefix"
+fi
 
 
 ############################################################
@@ -139,9 +149,11 @@ aws connect list-hours-of-operations \
     $profile_flag > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
-jq -r ".HoursOfOperationSummaryList |= sort_by(.Name) | .[][]" |
+# jq -r ".HoursOfOperationSummaryList |= sort_by(.Name) | .[][]" |
+jq -r ".HoursOfOperationSummaryList[]$jq_prefix_filter" |
+jq -s "sort_by(.Name) | .[]" |
 tee $instance_alias_dir/hours.json |
-echo -e "\n$(jq -s "length") hours of operations listed in $instance_alias_dir/hours.json"
+echo -e "\n$(jq -s "length") hours of operations listed in $instance_alias_dir/hours.json$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/hours.json |
 while read hour_id hour_name; do
@@ -168,7 +180,7 @@ cat $TEMPFILE |
 jq -r ".QueueSummaryList[] | select(.QueueType != \"AGENT\")$jq_prefix_filter" |
 jq -s "sort_by(.Name) | .[]" |
 tee $instance_alias_dir/queues.json |
-echo -e "\n$(jq -s "length") queues listed in $instance_alias_dir/queues.json"
+echo -e "\n$(jq -s "length") queues listed in $instance_alias_dir/queues.json$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/queues.json |
 while read queue_id queue_name; do
@@ -195,7 +207,7 @@ cat $TEMPFILE |
 jq -r ".RoutingProfileSummaryList[]$jq_prefix_filter" |
 jq -s "sort_by(.Name) | .[]" |
 tee $instance_alias_dir/routings.json |
-echo -e "\n$(jq -s "length") routing profiles listed in $instance_alias_dir/routings.json"
+echo -e "\n$(jq -s "length") routing profiles listed in $instance_alias_dir/routings.json$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/routings.json |
 while read routing_id routing_name; do
@@ -227,7 +239,7 @@ cat $TEMPFILE |
 jq -r ".ContactFlowModulesSummaryList[]${contact_flow_prefix_filter}${jq_prefix_filter}" |
 jq -s "sort_by(.Name) | .[]" |
 tee $instance_alias_dir/modules.json |
-echo -e "\n$(jq -s "length") contact flow modules listed in $instance_alias_dir/modules.json"
+echo -e "\n$(jq -s "length") contact flow modules listed in $instance_alias_dir/modules.json$contact_flow_prefix_text$jq_prefix_filter_text"
 
 
 ############################################################
@@ -262,7 +274,7 @@ cat $TEMPFILE |
 jq -r ".ContactFlowSummaryList[]${contact_flow_prefix_filter}${jq_prefix_filter}" |
 jq -s "sort_by(.Name) | .[]" |
 tee $instance_alias_dir/flows.json |
-echo -e "\n$(jq -s "length") contact flows listed in $instance_alias_dir/flows.json"
+echo -e "\n$(jq -s "length") contact flows listed in $instance_alias_dir/flows.json$contact_flow_prefix_text$jq_prefix_filter_text"
 
 
 ############################################################

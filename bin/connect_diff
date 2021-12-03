@@ -77,7 +77,6 @@ flow_template=$helper/flow_template.json
 cat <<EOD
 Instance Alias A: $instance_alias_a (in directory $instance_alias_dir_a)
 Instance Alias B: $instance_alias_b (in directory $instance_alias_dir_b)
-AWS Profile: ${profile:-${AWS_PROFILE:-(default)}}
 Helper: $helper
 EOD
 

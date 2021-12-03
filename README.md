@@ -50,13 +50,13 @@ specific components with their individual Contact Centre Codes (CCC).
 **Please replace names in the example with names specific to your use case.**
 
 ```
-connect_save -f -G zz source-connect source-profile
-connect_save -f -G zz target-connect target-profile
-connect_diff -f source-connect target-connect target-helper source- target-
+connect_save source-connect source-profile CCC
+connect_save target-connect target-profile CCC
+connect_diff source-connect target-connect target-helper source- target-
 # Dry run
-connect_copy -g CCC -d target-helper
+connect_copy -d target-helper
 # Real run
-connect_copy -g CCC target-helper
+connect_copy target-helper
 ```
 
 In this example:
@@ -66,8 +66,6 @@ In this example:
 - You may use the same profile for `source-profile` and `target-profile`,
   as long as that profile allows access to both the source and the target instances
   (typically when they are in the same AWS account).
-- Resources (queues, routing profiles and contact flows/modules) with names
-  prefixed by `zz` will be ignored (using the `-G` option).
 - Differences of the two instances (including profile specifications)
   will be saved in directory `target-helper`.
 - All Lambda functions are assumed deployed with function names prefixed by
@@ -75,9 +73,7 @@ In this example:
   (These two arguments can be omitted if the Lambda functions used in the source
   and target instances bear the same name.)
 - Only contact flows and modules with names prefixed by the `CCC`
-  Contact Centre Code will be copied.
-- Only contact flows and modules with names prefixed by `CCC`
-  will be copied to the target instance.
+  Contact Centre Code will be copied to the target instance.
 
 ## Copying process
 
@@ -89,10 +85,10 @@ Note: All names in Amazon Connect are case sensitive.
   target instances, or any Lambda functions they invoke.
 - Deploy all Lambda functions required by the target instance.
 - Upload all required prompts to the target instance.
-  - The prompt names need to be exactly the same as their counterparts
+  - The prompt names need to be *exactly* the same as their counterparts
     in the source instance.
-- For an incremental instance change, if there are contact flow/module name changes,
-  before the copying please manually change the corresponding flow/module names in
+- For an incremental instance change, if there are contact flow or module name changes,
+  before the copying please manually change the corresponding flow or module names in
   the *target* instance. Otherwise, contact flows and modules with new names will
   be created in the target instance, and those with old names will be left untouched.
 
@@ -103,8 +99,7 @@ Note: All names in Amazon Connect are case sensitive.
   - `<target_profile>` for the target instance
   - This step is optional if your default profile already has access to both
     the source and the target instances. If not sure, skip this step for now.
-    You only need to set up the profiles if `connect_save` or `connect_copy`
-    fail due to a permission error.
+    You only need to set up the profiles if `connect_save` fail due to a permission error.
 - `cd` to an empty working directory (e.g., `md <dir>; cd <dir>`).
 - Optionally, run `connect_save` with no arguments to show the help message:
   ```
@@ -115,11 +110,11 @@ Note: All names in Amazon Connect are case sensitive.
       profile              AWS Profile to use
       contact_flow_prefix  Prefix of Contact Flows and Modules of interest (all others will be ignored)
       -f                   Force removal of existing instance_alias directory
-      -G ignore_prefix     Ignore queues, routing profiles or flows/modules with names prefixed by ignore_prefix
+      -G ignore_prefix     Ignore hours, queues, routing profiles or flows/modules with names prefixed with ignore_prefix
       -?                   Help
   ```
-- Run `connect_save <source_instance_alias> <source_profile>` .
-- Run `connect_save <target_instance_alias> <target_profile>` .
+- Run `connect_save <source_instance_alias> <source_profile> <contact_flow_prefix>` .
+- Run `connect_save <target_instance_alias> <target_profile> <contact_flow_prefix>` .
 - Optionally, run `connect_diff` with no arguments to show the help message:
   ```
   Usage: connect_diff [-?f] instance_alias_a instance_alias_b helper [lambda_prefix_a] [lambda_prefix_b]
@@ -149,7 +144,7 @@ Note: All names in Amazon Connect are case sensitive.
     (instance A is the source, and instance B is the target)
 - Optionally, run `connect_copy` with no arguments to show the help message:
   ```
-  Usage: connect_copy [-?d] [-g cf_prefix] helper
+  Usage: connect_copy [-?d] helper
       Copy Amazon Connect instance A to instance B safely, based on the
       connect_list and connect_diff results, under the helper directory
       creating new components in helper.new, updating old components in helper.old,
@@ -157,12 +152,11 @@ Note: All names in Amazon Connect are case sensitive.
 
       helper        Name of the helper directory
       -d            Dry run - Run through the script but not updating the target instance
-      -g cf_prefix  Only copy contact flows/modules with their name prefixed by cf_prefix
       -?            Help
   ```
-- Optionally, verify the helper by dry-running `connect_copy -g <contact_flow_prefix> -d <helper>` .
+- Optionally, verify the helper by dry-running `connect_copy -d <helper>` .
   - Check if the proposed changes are as what you would expect.
-- Run `connect_copy -g <contact_flow_prefix> <helper>` .
+- Run `connect_copy <helper>` .
   - Verify if the target instance contains all source instance components
     of the latest version, with all internal references and Lambda invocations
     properly adjusted.
@@ -218,6 +212,7 @@ Example:
   in the source and the target instance directories.
 - `connect_copy` will change files in both the target instance directory and
   the helper directory (except in dry-run mode).
+  i.e., `connect_copy` is not idempotent to the target and helper directory.
 - DO NOT reuse the target instance directory and the helper directory.
   Remove these two directories after copying.
   - If you want to keep a backup of the target instance after copying,

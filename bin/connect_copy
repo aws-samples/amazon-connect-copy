@@ -6,7 +6,7 @@
 #
 
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?d] [-g cf_prefix] helper
+Usage: $(basename $0) [-?d] helper
     Copy Amazon Connect instance A to instance B safely, based on the
     connect_list and connect_diff results, under the helper directory
     creating new components in helper.new, updating old components in helper.old,
@@ -14,32 +14,12 @@ Usage: $(basename $0) [-?d] [-g cf_prefix] helper
 
     helper        Name of the helper directory
     -d            Dry run - Run through the script but not updating the target instance
-    -g cf_prefix  Only copy contact flows/modules with their name prefixed by cf_prefix
     -?            Help
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 
-error() {
-    if [ -n "$1" ]; then
-        cat <<EOD
-hour_json=$hour_json
-hour_id_a=$hour_id_a
-hour_id_b=$hour_id_b
-queue_json=$queue_json
-queue_id_a=$queue_id_a
-queue_id_b=$queue_id_b
-routing_json=$routing_json
-routing_id_a=$routing_id_a
-routing_id_b=$routing_id_b
-flow_json=$flow_json
-flow_id_a=$flow_id_a
-flow_id_b=$flow_id_b
-EOD
-        echo -e "Error: $1" >&2
-    fi
-    exit 1
-}
+error() { echo -e "Error: $1" >&2; exit 1; }
 
 diff_files() {
     # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
@@ -69,12 +49,9 @@ touch $TEMPFILE $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
 warning_awscli="Please install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 
 dryrun=
-cfPrefix=
-cfPrefixText=
-while getopts "?dg:" arg; do
+while getopts "?d" arg; do
   case "$arg" in
     d)  dryrun=on; echo "Dry Run";;
-    g)  cfPrefix=$OPTARG; cfPrefixText=" with name matching \"$cfPrefix\"";;
     *)  usage;;
   esac
 done
@@ -104,6 +81,7 @@ echo "Instance Alias B: $instance_alias_b (in directory $instance_alias_dir_b)"
 echo "Helper Directory: $helper"
 echo "AWS Profile B in use: ${profile:-${AWS_PROFILE:-(default)}}"
 echo "Context Flow Prefix: $contact_flow_prefix"
+contact_flow_prefix_text="${contact_flow_prefix:+ with name prefixed with \"$contact_flow_prefix\"}"
 
 helper_older_than=
 
@@ -114,8 +92,6 @@ fi
 if [ "$helper_var" -ot "$instance_alias_dir_b/instance.var" ]; then
     helper_older_than="$helper_older_than $instance_alias_b"
 fi
-
-echo helper_older_than=$helper_older_than
 
 if [ -n "$helper_older_than" ]; then
     echo
@@ -132,9 +108,16 @@ cat <<EOD
 
 Prompts
 -------
-Not copying these Prompts, assumed exist or not required:
 EOD
-egrep "^prompt_" $helper_new | sort | sed -e's/_/: /'
+
+egrep -q "^prompt_" $helper_new
+if [ $? -eq 1 ]; then
+    echo "All prompts in the source instance exist in the target instance."
+else
+    echo "These prompts are found in the source instance but do not exist in the target instance."
+    echo "Manual upload required:"
+    egrep "^prompt_" $helper_new | sort | sed -e's/_/: /'
+fi
 
 
 ############################################################
@@ -626,14 +609,14 @@ Contact Flow Modules Creation
 EOD
 
 # Preload as $helper_old may change
-egrep "^module_$cfPrefix" $helper_old > $TEMPOLD
+egrep "^module_$contact_flow_prefix" $helper_old > $TEMPOLD
 # Create what is in $helper_new
-egrep "^module_$cfPrefix" $helper_new > $TEMPNEW
+egrep "^module_$contact_flow_prefix" $helper_new > $TEMPNEW
 if [ ! -s $TEMPNEW ]; then
-    echo "No contact flow modules$cfPrefixText to create"
+    echo "No contact flow modules$contact_flow_prefix_text to create"
 else
     num_modules=$(echo $(cat $TEMPNEW | wc -l))
-    echo -e "\nCreating $num_modules contact flow modules$cfPrefixText"
+    echo -e "\nCreating $num_modules contact flow modules$contact_flow_prefix_text"
     ii=0
     sort $TEMPNEW |
     while read module_json; do
@@ -700,7 +683,7 @@ EOD
             $profile_flag > $TEMPFILE
         test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
-        jq -r ".ContactFlowModulesSummaryList[] | select(.Name | test(\"^($contact_flow_prefix).*\"))" \
+        jq -r ".ContactFlowModulesSummaryList[] | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))" \
         > $instance_alias_dir_b/modules.json
     fi
 fi
@@ -716,7 +699,7 @@ if [ ! -s $TEMPOLD ]; then
     echo "No contact flow modules to update"
 else
     num_modules=$(echo $(cat $TEMPOLD | wc -l))
-    echo -e "\nChecking $num_modules contact flow modules$cfPrefixText for an update"
+    echo -e "\nChecking $num_modules contact flow modules$contact_flow_prefix_text for an update"
     ii=0
     sort $TEMPOLD |
     while read module_json; do
@@ -781,14 +764,14 @@ Contact Flows Creation
 EOD
 
 # Preload as $helper_old may change
-egrep "^flow_$cfPrefix" $helper_old | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
+egrep "^flow_$contact_flow_prefix" $helper_old | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
 # Create what is in $helper_new
-egrep "^flow_$cfPrefix" $helper_new > $TEMPNEW
+egrep "^flow_$contact_flow_prefix" $helper_new > $TEMPNEW
 if [ ! -s $TEMPNEW ]; then
-    echo "No contact flows$cfPrefixText to create"
+    echo "No contact flows$contact_flow_prefix_text to create"
 else
     num_flows=$(echo $(cat $TEMPNEW | wc -l))
-    echo -e "\nCreating $num_flows contact flows$cfPrefixText"
+    echo -e "\nCreating $num_flows contact flows$contact_flow_prefix_text"
     ii=0
     sort $TEMPNEW |
     while read flow_json; do
@@ -871,7 +854,7 @@ EOD
             $profile_flag > $TEMPFILE
         test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
         cat $TEMPFILE |
-        jq -r ".ContactFlowSummaryList[] | select(.Name | test(\"^($contact_flow_prefix).*\"))" \
+        jq -r ".ContactFlowSummaryList[] | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))" \
         > $instance_alias_dir_b/flows.json
     fi
 fi
@@ -887,7 +870,7 @@ if [ ! -s $TEMPOLD ]; then
     echo "No contact flows to update"
 else
     num_flows=$(echo $(cat $TEMPOLD | wc -l))
-    echo -e "\nChecking $num_flows contact flows$cfPrefixText for an update"
+    echo -e "\nChecking $num_flows contact flows$contact_flow_prefix_text for an update"
     ii=0
     sort $TEMPOLD |
     while read flow_json; do
