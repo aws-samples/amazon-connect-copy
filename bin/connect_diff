@@ -158,6 +158,7 @@ if [ "$lambda_arn_prefix_a" != "$lambda_arn_prefix_b" ]; then
     echo "s%$lambda_arn_prefix_a%$lambda_arn_prefix_b%g" >> $helper_sed
 fi
 
+echo
 
 ############################################################
 #
@@ -325,10 +326,14 @@ cat > $flow_template <<EOD
 }
 EOD
 
-echo "$helper_var: About the source and target Amazon Connect instances"
-echo "$helper_new: Components to add to $instance_alias_dir_b"
-echo "$helper_old: Components to update for $instance_alias_dir_b based on $instance_alias_dir_a"
-echo "$helper_sed: SED script used to update components"
-echo "$flow_template: Contact Flow template json"
-echo
-echo "All done"
+cat <<EOD
+
+These helper files are created:
+$helper_var: About the source and target Amazon Connect instances
+$helper_new: Components to add to $instance_alias_dir_b
+$helper_old: Components to update for $instance_alias_dir_b based on $instance_alias_dir_a
+$helper_sed: SED script used to update components
+$flow_template: Contact Flow template json
+
+All done
+EOD

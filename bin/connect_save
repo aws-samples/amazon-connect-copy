@@ -43,10 +43,26 @@ fix_module_json() {
     done
 }
 
+aws_connect() {
+    local cmd=""
+    local ii
+    for ii; do
+        [[ "$ii" == *" "* ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
+    done
+    echo "aws connect$profile_flag$cmd" >> "$aws_cli_log"
+    eval aws connect$profile_flag$cmd 2> $TEMPERR
+    local ret=$?
+    if [ -s $TEMPERR ]; then
+        cat $TEMPERR | tee -a "$aws_cli_log" >&2
+    fi
+    return $ret
+}
+
 TEMPFILE=$(mktemp)
 TEMPFILE2=${TEMPFILE}_2
-trap 'rm -r -- $TEMPFILE $TEMPFILE2' EXIT
-touch $TEMPFILE $TEMPFILE2
+TEMPERR=${TEMPFILE}_err
+trap 'rm -r -- $TEMPFILE $TEMPFILE2 $TEMPERR' EXIT
+touch $TEMPFILE $TEMPFILE2 $TEMPERR
 
 warning_awscli="Please install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
 
@@ -69,7 +85,7 @@ shift $((OPTIND-1))
 instance_alias_dir=$1
 instance_alias=$(basename "$instance_alias_dir")
 profile=$2
-profile_flag=${profile:+--profile $profile}
+profile_flag=${profile:+ --profile $profile}
 
 contact_flow_prefix=$3
 contact_flow_prefix_filter=${contact_flow_prefix:+" | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))"}
@@ -98,16 +114,18 @@ if [ -n "$ignore_prefix" ]; then
     echo "Ignore components with prefix: $ignore_prefix"
 fi
 
-
 ############################################################
 #
 # Instance
 #
 
-# First aws cli; only mkdir if successful.
-aws connect list-instances $profile_flag > $TEMPFILE
-test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 mkdir -p $instance_alias_dir
+aws_cli_log="${instance_alias_dir%/}.log"
+> "$aws_cli_log"
+
+# First aws cli; only mkdir if successful.
+aws_connect list-instances > $TEMPFILE
+test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 
 instance_id=$(cat $TEMPFILE |
 jq -r ".InstanceSummaryList[] | select(.InstanceAlias == \"$instance_alias\")" |
@@ -129,9 +147,9 @@ echo "instance_contact_flow_prefix=\"$contact_flow_prefix\"" >> $instance_alias_
 # Prompts
 #
 
-aws connect list-prompts \
+aws_connect list-prompts \
     --instance-id $instance_id \
-    $profile_flag > $TEMPFILE
+    > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
 jq -r ".PromptSummaryList |= sort_by(.Name) | .[][]" |
@@ -144,9 +162,9 @@ echo -e "\n$(jq -s "length") prompts listed in $instance_alias_dir/prompts.json"
 # Hours of operations
 #
 
-aws connect list-hours-of-operations \
+aws_connect list-hours-of-operations \
     --instance-id $instance_id \
-    $profile_flag > $TEMPFILE
+    > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
 # jq -r ".HoursOfOperationSummaryList |= sort_by(.Name) | .[][]" |
@@ -158,10 +176,10 @@ echo -e "\n$(jq -s "length") hours of operations listed in $instance_alias_dir/h
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/hours.json |
 while read hour_id hour_name; do
     echo "Exporting hours of operation $hour_name"
-    aws connect describe-hours-of-operation \
+    aws_connect describe-hours-of-operation \
         --instance-id $instance_id \
         --hours-of-operation-id $hour_id \
-        $profile_flag > "$instance_alias_dir/hour_$hour_name.json"
+        > "$instance_alias_dir/hour_$hour_name.json"
     test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 done
 test $? -eq 0 || error
@@ -172,9 +190,9 @@ test $? -eq 0 || error
 # Queues
 #
 
-aws connect list-queues \
+aws_connect list-queues \
     --instance-id $instance_id \
-    $profile_flag > $TEMPFILE
+    > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
 jq -r ".QueueSummaryList[] | select(.QueueType != \"AGENT\")$jq_prefix_filter" |
@@ -185,10 +203,10 @@ echo -e "\n$(jq -s "length") queues listed in $instance_alias_dir/queues.json$jq
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/queues.json |
 while read queue_id queue_name; do
     echo "Exporting queue $queue_name"
-    aws connect describe-queue \
+    aws_connect describe-queue \
         --instance-id $instance_id \
         --queue-id $queue_id \
-        $profile_flag > "$instance_alias_dir/queue_$queue_name.json"
+        > "$instance_alias_dir/queue_$queue_name.json"
     test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 done
 test $? -eq 0 || error
@@ -199,9 +217,9 @@ test $? -eq 0 || error
 # Routing Profiles
 #
 
-aws connect list-routing-profiles \
+aws_connect list-routing-profiles \
     --instance-id $instance_id \
-    $profile_flag > $TEMPFILE
+    > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
 jq -r ".RoutingProfileSummaryList[]$jq_prefix_filter" |
@@ -212,15 +230,15 @@ echo -e "\n$(jq -s "length") routing profiles listed in $instance_alias_dir/rout
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/routings.json |
 while read routing_id routing_name; do
     echo "Exporting routing profile $routing_name"
-    aws connect describe-routing-profile \
+    aws_connect describe-routing-profile \
         --instance-id $instance_id \
         --routing-profile-id $routing_id \
-        $profile_flag > "$instance_alias_dir/routing_$routing_name.json"
+        > "$instance_alias_dir/routing_$routing_name.json"
     test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
-    aws connect list-routing-profile-queues \
+    aws_connect list-routing-profile-queues \
         --instance-id $instance_id \
         --routing-profile-id $routing_id \
-        $profile_flag > "$instance_alias_dir/routingQs_$routing_name.json"
+        > "$instance_alias_dir/routingQs_$routing_name.json"
     test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 done
 test $? -eq 0 || error
@@ -231,9 +249,9 @@ test $? -eq 0 || error
 # Contact Flow Modules
 #
 
-aws connect list-contact-flow-modules \
+aws_connect list-contact-flow-modules \
     --instance-id $instance_id \
-    $profile_flag > $TEMPFILE
+    > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
 jq -r ".ContactFlowModulesSummaryList[]${contact_flow_prefix_filter}${jq_prefix_filter}" |
@@ -250,9 +268,9 @@ echo -e "\n$(jq -s "length") contact flow modules listed in $instance_alias_dir/
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/modules.json |
 while read module_id module_name; do
     echo "Exporting contact flow module $module_name"
-    aws connect describe-contact-flow-module \
+    aws_connect describe-contact-flow-module \
         --instance-id $instance_id \
-        --contact-flow-module-id $module_id $profile_flag > $TEMPFILE
+        --contact-flow-module-id $module_id > $TEMPFILE
     test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
     cat $TEMPFILE |
     jq -r '.ContactFlowModule.Content' > "$instance_alias_dir/module_$module_name.json"
@@ -266,9 +284,9 @@ test $? -eq 0 || error
 # Contact Flows
 #
 
-aws connect list-contact-flows \
+aws_connect list-contact-flows \
     --instance-id $instance_id \
-    $profile_flag > $TEMPFILE
+    > $TEMPFILE
 test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
 cat $TEMPFILE |
 jq -r ".ContactFlowSummaryList[]${contact_flow_prefix_filter}${jq_prefix_filter}" |
@@ -285,9 +303,9 @@ echo -e "\n$(jq -s "length") contact flows listed in $instance_alias_dir/flows.j
 jq -r ".Id + \" \" + .Name" $instance_alias_dir/flows.json |
 while read flow_id flow_name; do
     echo "Exporting contact flow $flow_name"
-    aws connect describe-contact-flow \
+    aws_connect describe-contact-flow \
         --instance-id $instance_id \
-        --contact-flow-id $flow_id $profile_flag > $TEMPFILE
+        --contact-flow-id $flow_id > $TEMPFILE
     test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
     cat $TEMPFILE |
     jq -r '.ContactFlow.Content' > "$instance_alias_dir/flow_$flow_name.json"
@@ -295,4 +313,4 @@ done
 test $? -eq 0 || error
 
 echo
-echo All done
+echo "All done"

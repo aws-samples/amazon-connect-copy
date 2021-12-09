@@ -211,7 +211,7 @@ Example:
 - `connect_diff` only creates the helper directory and will not change anything
   in the source and the target instance directories.
 - `connect_copy` will change files in both the target instance directory and
-  the helper directory (except in dry-run mode).
+  the helper directory. (While in dry-run mode, only helper.log will be changed.)
   i.e., `connect_copy` is not idempotent to the target and helper directory.
 - DO NOT reuse the target instance directory and the helper directory.
   Remove these two directories after copying.
