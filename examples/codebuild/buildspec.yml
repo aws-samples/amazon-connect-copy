@@ -1,0 +1,35 @@
+version: 0.2
+
+env:
+  variables:
+    LANG: "en_GB.UTF-8"
+    source_dir: "source_dir_saved_by_connect_save"
+    target_dir: "artifacts/target_instance_alias"
+    helper: "artifacts/target-helper"
+    source_lambda_prefix: "source-lambda-prefix-"
+    target_lambda_prefix: "target-lambda-prefix-"
+    aws_profile: ""
+    # contact_flow_prefix: "in_scope_contact_flow_prefix"
+    # save_options: "-G component_prefix_to_ignore"
+phases:
+  install:
+    commands:
+      - jq --version
+      - curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+      - unzip awscliv2.zip &> /dev/null
+      - ./aws/install -b /usr/local/bin/sbt/bin
+  pre_build:
+    commands:
+      - bin/connect_save $save_options "$target_dir" "$aws_profile" "$contact_flow_prefix"
+      - bin/connect_diff "$source_dir" "$target_dir" "$helper" "$source_lambda_prefix" "$target_lambda_prefix"
+  build:
+    commands:
+      - bin/connect_copy -d "$helper"
+      - test $? -ne 0 && echo "No updates" || bin/connect_copy "$helper"
+  post_build:
+    commands:
+      - cat "$helper/helper.log"
+artifacts:
+  files:
+    - "**/*"
+  base-directory: artifacts

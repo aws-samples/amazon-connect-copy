@@ -75,17 +75,17 @@ routing_profile_to_ignore="Basic Routing Profile"
 flow_template=$helper/flow_template.json
 
 cat <<EOD
-Instance Alias A: $instance_alias_a (in directory $instance_alias_dir_a)
-Instance Alias B: $instance_alias_b (in directory $instance_alias_dir_b)
+Instance Alias A: $instance_alias_a (in directory "$instance_alias_dir_a")
+Instance Alias B: $instance_alias_b (in directory "$instance_alias_dir_b")
 Helper: $helper
 EOD
 
 errorMsg=
 if [ ! -d "$instance_alias_dir_a" ]; then
-    errorMsg="$errorMsg $instance_alias_dir_a"
+    errorMsg="$errorMsg \"$instance_alias_dir_a\""
 fi
 if [ ! -d "$instance_alias_dir_b" ]; then
-    errorMsg="$errorMsg $instance_alias_dir_b"
+    errorMsg="$errorMsg \"$instance_alias_dir_b\""
 fi
 if [ -n "$errorMsg" ]; then
     errorMsg="Cannot find instance directories:$errorMsg"
@@ -106,14 +106,12 @@ done
 # Instance
 #
 
-echo instance_alias_a=$instance_alias_a | tee -a $helper_var
-echo instance_alias_dir_a=$instance_alias_dir_a | tee -a $helper_var
-echo instance_alias_b=$instance_alias_b | tee -a $helper_var
-echo instance_alias_dir_b=$instance_alias_dir_b | tee -a $helper_var
+echo "instance_alias_a=$instance_alias_a" | tee -a $helper_var
+echo "instance_alias_dir_a=\"$instance_alias_dir_a\"" | tee -a $helper_var
+echo "instance_alias_b=$instance_alias_b" | tee -a $helper_var
+echo "instance_alias_dir_b=\"$instance_alias_dir_b\"" | tee -a $helper_var
 
-. $instance_alias_dir_a/instance.var
-# Use Instance A contact flow prefix
-echo "contact_flow_prefix=\"$instance_contact_flow_prefix\"" | tee -a $helper_var
+. "$instance_alias_dir_a/instance.var"
 
 instance_id_a=$instance_Id
 instance_arn_a=$instance_Arn
@@ -126,7 +124,7 @@ echo region_a=$region_a | tee -a $helper_var
 echo aws_ac_a=$aws_ac_a | tee -a $helper_var
 echo aws_profile_a=$aws_Profile | tee -a $helper_var
 
-. $instance_alias_dir_b/instance.var
+. "$instance_alias_dir_b/instance.var"
 instance_id_b=$instance_Id
 instance_arn_b=$instance_Arn
 eval $(echo $instance_arn_b | (IFS=: read x x x r a x; echo "region_b=$r; aws_ac_b=$a"))
@@ -137,6 +135,9 @@ echo instance_arn_b=$instance_arn_b | tee -a $helper_var
 echo region_b=$region_b | tee -a $helper_var
 echo aws_ac_b=$aws_ac_b | tee -a $helper_var
 echo aws_profile_b=$aws_Profile | tee -a $helper_var
+
+# Use Instance B contact flow prefix
+echo "contact_flow_prefix=\"$instance_contact_flow_prefix\"" | tee -a $helper_var
 
 
 ############################################################
@@ -166,9 +167,9 @@ echo
 #
 
 echo Checking Prompts ...
-jq -r ".Id + \" \" + .Name" $instance_alias_dir_a/prompts.json |
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/prompts.json" |
 while read prompt_id_a prompt_name; do
-    prompt_id_b=$(jq -r "select(.Name == \"$prompt_name\") | .Id" $instance_alias_dir_b/prompts.json)
+    prompt_id_b=$(jq -r "select(.Name == \"$prompt_name\") | .Id" "$instance_alias_dir_b/prompts.json")
     if [ -z "$prompt_id_b" ]; then
         echo "prompt_$prompt_name" >> $helper_new
     else
@@ -188,9 +189,9 @@ test $? -eq 0 || error
 #
 
 echo Checking House of operations ...
-jq -r ".Id + \" \" + .Name" $instance_alias_dir_a/hours.json |
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/hours.json" |
 while read hour_id_a hour_name; do
-    hour_id_b=$(jq -r "select(.Name == \"$hour_name\") | .Id" $instance_alias_dir_b/hours.json)
+    hour_id_b=$(jq -r "select(.Name == \"$hour_name\") | .Id" "$instance_alias_dir_b/hours.json")
     if [ -z "$hour_id_b" ]; then
         add_file "$instance_alias_dir_a" "hour_$hour_name.json" $helper_new
     else
@@ -210,9 +211,9 @@ test $? -eq 0 || error
 #
 
 echo Checking Queues ...
-jq -r ".Id + \" \" + .Name" $instance_alias_dir_a/queues.json |
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/queues.json" |
 while read queue_id_a queue_name; do
-    queue_id_b=$(jq -r "select(.Name == \"$queue_name\") | .Id" $instance_alias_dir_b/queues.json)
+    queue_id_b=$(jq -r "select(.Name == \"$queue_name\") | .Id" "$instance_alias_dir_b/queues.json")
     if [ -z "$queue_id_b" ]; then
         add_file "$instance_alias_dir_a" "queue_$queue_name.json" $helper_new
     else
@@ -232,12 +233,12 @@ test $? -eq 0 || error
 #
 
 echo Checking Routing Profiles ...
-jq -r ".Id + \" \" + .Name" $instance_alias_dir_a/routings.json |
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/routings.json" |
 while read routing_id_a routing_name; do
     if [ "$routing_name" == "$routing_profile_to_ignore" ]; then
         continue
     fi
-    routing_id_b=$(jq -r "select(.Name == \"$routing_name\") | .Id" $instance_alias_dir_b/routings.json)
+    routing_id_b=$(jq -r "select(.Name == \"$routing_name\") | .Id" "$instance_alias_dir_b/routings.json")
     if [ -z "$routing_id_b" ]; then
         add_file "$instance_alias_dir_a" "routing_$routing_name.json" $helper_new
         add_file "$instance_alias_dir_a" "routingQs_$routing_name.json" $helper_new
@@ -259,9 +260,9 @@ test $? -eq 0 || error
 #
 
 echo Checking Contact Flow Modules ...
-jq -r ".Id + \" \" + .Name" $instance_alias_dir_a/modules.json |
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/modules.json" |
 while read module_id_a module_name; do
-    module_id_b=$(jq -r "select(.Name == \"$module_name\") | .Id" $instance_alias_dir_b/modules.json)
+    module_id_b=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_b/modules.json")
     if [ -z "$module_id_b" ]; then
         add_file "$instance_alias_dir_a" "module_$module_name.json" $helper_new
     else
@@ -281,9 +282,9 @@ test $? -eq 0 || error
 #
 
 echo Checking Contact Flows ...
-jq -r ".Id + \" \" + .Name" $instance_alias_dir_a/flows.json |
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/flows.json" |
 while read flow_id_a flow_name; do
-    flow_id_b=$(jq -r "select(.Name == \"$flow_name\") | .Id" $instance_alias_dir_b/flows.json)
+    flow_id_b=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_b/flows.json")
     if [ -z "$flow_id_b" ]; then
         add_file "$instance_alias_dir_a" "flow_$flow_name.json" $helper_new
     else
@@ -330,8 +331,8 @@ cat <<EOD
 
 These helper files are created:
 $helper_var: About the source and target Amazon Connect instances
-$helper_new: Components to add to $instance_alias_dir_b
-$helper_old: Components to update for $instance_alias_dir_b based on $instance_alias_dir_a
+$helper_new: Components to add to "$instance_alias_dir_b"
+$helper_old: Components to update for "$instance_alias_dir_b" based on "$instance_alias_dir_a"
 $helper_sed: SED script used to update components
 $flow_template: Contact Flow template json
 

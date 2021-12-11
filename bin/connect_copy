@@ -19,7 +19,25 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 
-error() { echo -e "Error: $1" >&2; exit 1; }
+error() {
+    if [[ ! "$1" =~ ^[[:digit:]]+$ ]]; then
+        # Not an AWS CLI error
+        cat <<EOD >&2
+Error: $*
+EOD
+    else
+        # An AWS CLI error
+        line_no=$1
+        shift
+        cat <<EOD >&2
+$*
+Error at line ${line_no}. Recommended actions:
+Make sure all required prompts exist in the target instance, and
+Install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html .
+EOD
+    fi
+    exit 1
+}
 
 diff_files() {
     # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
@@ -61,8 +79,6 @@ TEMPA3=${TEMPFILE}_A3
 trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3' EXIT
 touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
 
-warning_awscli="Please install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html\nand make sure all required prompts exist in the target instance."
-
 dryrun=
 while getopts "?d" arg; do
   case "$arg" in
@@ -90,12 +106,15 @@ fi
 profile=$aws_profile_b
 profile_flag=${profile:+ --profile $profile}
 
-echo "Instance Alias A: $instance_alias_a (in directory $instance_alias_dir_a)"
-echo "Instance Alias B: $instance_alias_b (in directory $instance_alias_dir_b)"
-echo "Helper Directory: $helper"
-echo "AWS Profile B in use: ${profile:-${AWS_PROFILE:-(default)}}"
-echo "Context Flow Prefix: $contact_flow_prefix"
-contact_flow_prefix_text="${contact_flow_prefix:+ with name prefixed with \"$contact_flow_prefix\"}"
+cat <<EOD
+Instance Alias A: $instance_alias_a (in directory "$instance_alias_dir_a")
+Instance Alias B: $instance_alias_b (in directory "$instance_alias_dir_b")
+Helper Directory: $helper
+AWS Profile B in use: ${profile:-${AWS_PROFILE:-(default)}}
+Context Flow Prefix: $contact_flow_prefix
+EOD
+
+contact_flow_prefix_text="${contact_flow_prefix:+ with names prefixed with \"$contact_flow_prefix\"}"
 
 helper_older_than=
 
@@ -173,7 +192,7 @@ else
 
         echo "Action - Create hours of operation: $hour_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-create hours of operation
 $(cat "$helper/$hour_json")
 
@@ -185,14 +204,14 @@ EOD
         aws_connect create-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             > "$helper/output_$hour_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json")
 
         aws_connect describe-hours-of-operation \
             --instance-id $instance_id_b \
             --hours-of-operation-id $hour_id_b \
             > "$instance_alias_dir_b/$hour_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         # Moving hour_json from helper_new to helper_old
         echo $hour_json >> $helper_old
@@ -211,9 +230,9 @@ EOD
         aws_connect list-hours-of-operations \
             --instance-id $instance_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
-        jq -r ".HoursOfOperationSummaryList[]" > $instance_alias_dir_b/hours.json
+        jq -r ".HoursOfOperationSummaryList[]" > "$instance_alias_dir_b/hours.json"
     fi
 fi
 
@@ -244,7 +263,7 @@ else
 
         echo "Action - Update hours of operation: $hour_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-update hours of operation
 $(cat "$helper/$hour_json")
 
@@ -256,13 +275,13 @@ EOD
         aws_connect update-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             > "$helper/output_$hour_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         aws_connect describe-hours-of-operation \
             --instance-id $instance_id_b \
             --hours-of-operation-id $hour_id_b \
             > "$instance_alias_dir_b/$hour_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
     done
     test $? -eq 0 || error
 fi
@@ -304,7 +323,7 @@ else
 
         echo "Action - Create queue: $queue_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-create queue
 $(cat "$helper/$queue_json")
 
@@ -316,14 +335,14 @@ EOD
         aws_connect create-queue \
             --cli-input-json "file://$helper/$queue_json" \
             > "$helper/output_$queue_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json")
 
         aws_connect describe-queue \
             --instance-id $instance_id_b \
             --queue-id $queue_id_b \
             > "$instance_alias_dir_b/$queue_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         # Moving queue_json from helper_new to helper_old
         echo $queue_json >> $helper_old
@@ -342,9 +361,9 @@ EOD
         aws_connect list-queues \
             --instance-id $instance_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
-        jq -r ".QueueSummaryList[] | select(.QueueType != \"AGENT\")" > $instance_alias_dir_b/queues.json
+        jq -r ".QueueSummaryList[] | select(.QueueType != \"AGENT\")" > "$instance_alias_dir_b/queues.json"
     fi
 fi
 
@@ -441,7 +460,7 @@ else
 
         echo "Action - Create routing profile: $routing_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-create routing profile
 $(cat "$routing_new_file")
 
@@ -453,7 +472,7 @@ EOD
         aws_connect create-routing-profile \
             --cli-input-json "file://$routing_new_file" \
             > "$out_file"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         routing_id_b=$(jq -r ".RoutingProfileId" "$out_file")
 
         # All routing profiles will be updated with queues
@@ -463,13 +482,13 @@ EOD
             --instance-id $instance_id_b \
             --routing-profile-id $routing_id_b \
             > "$instance_alias_dir_b/$routing_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         aws_connect list-routing-profile-queues \
             --instance-id $instance_id_b \
             --routing-profile-id $routing_id_b \
             > "$instance_alias_dir_b/routingQs_$routing_name.json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         # Moving routing_json from helper_new to helper_old
         echo "$routing_json" >> $helper_old
@@ -488,9 +507,9 @@ EOD
         aws_connect list-routing-profiles \
             --instance-id $instance_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
-        jq -r ".RoutingProfileSummaryList[]" > $instance_alias_dir_b/routings.json
+        jq -r ".RoutingProfileSummaryList[]" > "$instance_alias_dir_b/routings.json"
     fi
 fi
 
@@ -549,7 +568,7 @@ else
 
             echo "Action - Update routing profile: $routing_name" >> $helper_log
             if [ -n "$dryrun" ]; then
-                cat << EOD
+                cat <<EOD
 Dry-update routing profile default outbound queue to "$routing_doq_b"
 Dry-update routing profile concurrency
 $(cat "$helper/routingConcurrency_$routing_name.json")
@@ -571,7 +590,7 @@ EOD
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
                     > "$instance_alias_dir_b/$routing_json"
-                test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+                test $? -eq 0 || error $LINENO
             fi
         fi
 
@@ -593,7 +612,7 @@ EOD
             cat $TEMPA2 | sed -f $helper_sed | jq -s > $TEMPFILE
             echo "Action - Associate queues to routing profile: $routing_name" >> $helper_log
             if [ -n "$dryrun" ]; then
-                cat << EOD
+                cat <<EOD
 Dry-associate queues to routing profile $routing_name:
 $(cat $TEMPA3)
 $(cat $TEMPFILE)
@@ -605,13 +624,13 @@ EOD
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
                     --queue-configs "file://$TEMPFILE"
-                test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+                test $? -eq 0 || error $LINENO
 
                 aws_connect list-routing-profile-queues \
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
                     > "$instance_alias_dir_b/routingQs_$routing_name.json"
-                test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+                test $? -eq 0 || error $LINENO
             fi
         fi
     done
@@ -655,7 +674,7 @@ else
 
         echo "Action - Create contact flow module: $module_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-create contact flow module
 --instance-id $instance_id_b
 --name "$module_name"
@@ -673,7 +692,7 @@ EOD
             --name "$module_name" \
             --content "file://$helper/$module_json" \
             > "$out_file"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         module_id_b=$(jq -r ".Id" "$out_file")
 
         # All flows will be updated with content
@@ -683,7 +702,7 @@ EOD
             --instance-id $instance_id_b \
             --contact-flow-module-id $module_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
         jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
 
@@ -704,10 +723,10 @@ EOD
         aws_connect list-contact-flow-modules \
             --instance-id $instance_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
         jq -r ".ContactFlowModulesSummaryList[] | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))" \
-        > $instance_alias_dir_b/modules.json
+        > "$instance_alias_dir_b/modules.json"
     fi
 fi
 
@@ -742,7 +761,7 @@ else
 
         echo "Action - Update contact flow module: $module_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-update contact flow module
 --instance-id $instance_id_b
 --contact-flow-module-id $module_id_b
@@ -757,13 +776,13 @@ EOD
             --contact-flow-module-id $module_id_b \
             --content "file://$helper/$module_json" \
             > "$helper/output_content_$module_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         aws_connect describe-contact-flow-module \
             --instance-id $instance_id_b \
             --contact-flow-module-id $module_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
         jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
     done
@@ -830,7 +849,7 @@ else
 
         echo "Action - Create contact flow: $flow_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-create contact flow from Template (Default flows)
 --instance-id $instance_id_b
 --name "$flow_name"
@@ -846,7 +865,7 @@ EOD
             --type $flow_type \
             --content "file://$flow_template_file" \
             > "$out_file"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         flow_id_b=$(jq -r ".ContactFlowId" "$out_file")
 
         # All flows will be updated with content
@@ -856,7 +875,7 @@ EOD
             --instance-id $instance_id_b \
             --contact-flow-id $flow_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
 
@@ -877,10 +896,10 @@ EOD
         aws_connect list-contact-flows \
             --instance-id $instance_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
         jq -r ".ContactFlowSummaryList[] | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))" \
-        > $instance_alias_dir_b/flows.json
+        > "$instance_alias_dir_b/flows.json"
     fi
 fi
 
@@ -914,7 +933,7 @@ else
 
         echo "Action - Update contact flow: $flow_name" >> $helper_log
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-update contact flow
 --instance-id $instance_id_b
 --contact-flow-id $flow_id_b
@@ -929,13 +948,13 @@ EOD
             --contact-flow-id $flow_id_b \
             --content "file://$helper/$flow_json" \
             > "$helper/output_content_$flow_json"
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
 
         aws_connect describe-contact-flow \
             --instance-id $instance_id_b \
             --contact-flow-id $flow_id_b \
             > $TEMPFILE
-        test $? -eq 0 || error "AWS CLI error at line $LINENO.\n$warning_awscli"
+        test $? -eq 0 || error $LINENO
         cat $TEMPFILE |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
     done
@@ -965,7 +984,7 @@ if [ -s $TEMPFILE ]; then
         ii=$[ii+1]
         echo "$ii. $lambdaArn"
         if [ -n "$dryrun" ]; then
-            cat << EOD
+            cat <<EOD
 Dry-associating lambda function
 --instance-id $instance_id_b \
 --function-arn $lambdaArn \

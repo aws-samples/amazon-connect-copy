@@ -103,14 +103,15 @@ Note: All names in Amazon Connect are case sensitive.
 - `cd` to an empty working directory (e.g., `md <dir>; cd <dir>`).
 - Optionally, run `connect_save` with no arguments to show the help message:
   ```
-  Usage: connect_save [-?f] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
+  Usage: connect_save [-?fs] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
       Retrieve resources from an Amazon Connect instance into plain files
 
       instance_alias       Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
       profile              AWS Profile to use
       contact_flow_prefix  Prefix of Contact Flows and Modules of interest (all others will be ignored)
       -f                   Force removal of existing instance_alias directory
-      -G ignore_prefix     Ignore hours, queues, routing profiles or flows/modules with names prefixed with ignore_prefix
+      -s                   Skip unpublished contact flow modules and contact flows with an error, instead of failing
+      -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
       -?                   Help
   ```
 - Run `connect_save <source_instance_alias> <source_profile> <contact_flow_prefix>` .
