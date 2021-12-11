@@ -1,14 +1,36 @@
 version: 0.2
 
+# Repository directory structure
+# .
+# ├── bin
+# │   ├── connect_copy
+# │   ├── connect_diff
+# │   └── connect_save
+# ├── buildspec.yml
+# └── src
+#     └── source_dir_saved_by_connect_save
+
+# Artifacts directory structure
+# artifacts
+# ├── post-build
+# │   ├── target_instance_alias
+# │   └── target_instance_alias.log
+# ├── pre-build
+# │   ├── target_instance_alias
+# │   └── target_instance_alias.log
+# └── helper
+#     ├── ...
+#     └── ...
+
 env:
   variables:
     LANG: "en_GB.UTF-8"
-    source_dir: "source_dir_saved_by_connect_save"
-    target_dir: "artifacts/target_instance_alias"
-    helper: "artifacts/target-helper"
+    source_dir: "src/source_dir_saved_by_connect_save"
+    target_dir: "artifacts/pre-build/target_instance_alias"
+    target_post_build_dir: "artifacts/post-build/target_instance_alias"
+    helper: "artifacts/helper"
     source_lambda_prefix: "source-lambda-prefix-"
     target_lambda_prefix: "target-lambda-prefix-"
-    aws_profile: ""
     # contact_flow_prefix: "in_scope_contact_flow_prefix"
     # save_options: "-G component_prefix_to_ignore"
 phases:
@@ -20,7 +42,7 @@ phases:
       - ./aws/install -b /usr/local/bin/sbt/bin
   pre_build:
     commands:
-      - bin/connect_save $save_options "$target_dir" "$aws_profile" "$contact_flow_prefix"
+      - bin/connect_save $save_options "$target_dir" "" "$contact_flow_prefix"
       - bin/connect_diff "$source_dir" "$target_dir" "$helper" "$source_lambda_prefix" "$target_lambda_prefix"
   build:
     commands:
@@ -28,7 +50,7 @@ phases:
       - test $? -ne 0 && echo "No updates" || bin/connect_copy "$helper"
   post_build:
     commands:
-      - cat "$helper/helper.log"
+      - bin/connect_save $save_options "$target_post_build_dir" "" "$contact_flow_prefix"
 artifacts:
   files:
     - "**/*"
