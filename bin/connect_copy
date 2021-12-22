@@ -79,6 +79,7 @@ TEMPA3=${TEMPFILE}_A3
 trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3' EXIT
 touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
 
+actionLead="# Action -"
 dryrun=
 while getopts "?d" arg; do
   case "$arg" in
@@ -132,9 +133,19 @@ if [ -n "$helper_older_than" ]; then
 fi
 
 helper_log="${helper%/}.log"
-> "$helper_log"
 aws_cli_log="$helper_log"
+cat <<EOD > "$helper_log"
+# This log file is for AWS CLI tracing, not for direct execution.
+# Please use the $(basename $0) command (in non-dry-run mode) to perform the copying instead.
+#
+EOD
 
+if [ -n "$dryrun" ]; then
+    cat <<EOD >> "$helper_log"
+# Dry-run mode - Actions listed below are not being carried out
+#
+EOD
+fi
 
 ############################################################
 #
@@ -191,14 +202,22 @@ else
             ".HoursOfOperation | del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid}" |
             sed -f "$helper_sed" > "$helper/$hour_json"
 
-        echo "Action - Create hours of operation: $hour_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Create hours of operation: $hour_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create hours of operation
 $(cat "$helper/$hour_json")
 
 EOD
-            rm "$helper/$hour_json"
+            cat <<EOD >> "$helper_log"
+aws connect create-hours-of-operation \
+--cli-input-json "file://$helper/$hour_json" \
+> "$helper/output_$hour_json"
+EOD
+            # rm "$helper/$hour_json"
             continue
         fi
 
@@ -259,14 +278,22 @@ else
             ".HoursOfOperation | del(.HoursOfOperationArn, .Tags) | . + { InstanceId: \$iid, HoursOfOperationId: \$id }" \
             > "$helper/$hour_json"
 
-        echo "Action - Update hours of operation: $hour_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Update hours of operation: $hour_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-update hours of operation
 $(cat "$helper/$hour_json")
 
 EOD
-            rm "$helper/$hour_json"
+            cat <<EOD >> "$helper_log"
+aws connect update-hours-of-operation \
+--cli-input-json "file://$helper/$hour_json" \
+> "$helper/output_$hour_json"
+EOD
+            # rm "$helper/$hour_json"
             continue
         fi
 
@@ -317,14 +344,22 @@ else
             ".Queue | del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status) | . + { InstanceId: \$instance_id}" |
         sed -f "$helper_sed" > "$helper/$queue_json"
 
-        echo "Action - Create queue: $queue_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Create queue: $queue_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create queue
 $(cat "$helper/$queue_json")
 
 EOD
-            rm "$helper/$queue_json"
+            cat <<EOD >> "$helper_log"
+aws connect create-queue \
+--cli-input-json "file://$helper/$queue_json" \
+> "$helper/output_$queue_json"
+EOD
+            # rm "$helper/$queue_json"
             continue
         fi
 
@@ -451,14 +486,22 @@ else
         routing_new_file=$(gen_helper_routing_new "$routing_name")
         out_file="$helper/output_routing_new_$routing_name.json"
 
-        echo "Action - Create routing profile: $routing_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Create routing profile: $routing_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create routing profile
 $(cat "$routing_new_file")
 
 EOD
-            rm "$routing_new_file"
+            cat <<EOD >> "$helper_log"
+aws connect create-routing-profile \
+--cli-input-json "file://$routing_new_file" \
+> "$out_file"
+EOD
+            # rm "$routing_new_file"
             continue
         fi
 
@@ -555,7 +598,10 @@ else
             jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" |
             jq -s > "$helper/routingConcurrency_$routing_name.json"
 
-            echo "Action - Update routing profile: $routing_name" >> "$helper_log"
+            cat <<EOD >> "$helper_log"
+
+$actionLead Update routing profile: $routing_name
+EOD
             if [ -n "$dryrun" ]; then
                 cat <<EOD
 Dry-update routing profile default outbound queue to "$routing_doq_b"
@@ -563,7 +609,17 @@ Dry-update routing profile concurrency
 $(cat "$helper/routingConcurrency_$routing_name.json")
 
 EOD
-                rm "$helper/routingConcurrency_$routing_name.json"
+                cat <<EOD >> "$helper_log"
+aws connect update-routing-profile-default-outbound-queue \
+--instance-id $instance_id_b \
+--routing-profile-id $routing_id_b \
+--default-outbound-queue-id $routing_doq_b
+aws connect update-routing-profile-concurrency \
+--instance-id $instance_id_b \
+--routing-profile-id $routing_id_b \
+--media-concurrencies "file://$helper/routingConcurrency_$routing_name.json"
+EOD
+                # rm "$helper/routingConcurrency_$routing_name.json"
             else
                 aws_connect update-routing-profile-default-outbound-queue \
                     --instance-id $instance_id_b \
@@ -597,21 +653,32 @@ EOD
                 cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
                     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"$q_name\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
             done
-            cat $TEMPA2 | sed -f "$helper_sed" | jq -s > $TEMPFILE
-            echo "Action - Associate queues to routing profile: $routing_name" >> "$helper_log"
+            cat $TEMPA2 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
+
+            cat <<EOD >> "$helper_log"
+
+$actionLead Associate queues to routing profile: $routing_name
+EOD
             if [ -n "$dryrun" ]; then
                 cat <<EOD
-Dry-associate queues to routing profile $routing_name:
+Dry-associate queues to routing profile $routing_name
 $(cat $TEMPA3)
 $(cat $TEMPFILE)
 
 EOD
+               cat <<EOD >> "$helper_log"
+aws connect associate-routing-profile-queues \
+--instance-id $instance_id_b \
+--routing-profile-id $routing_id_b \
+--queue-configs "file://$helper/routingQueueConfig_$routing_name.json"
+EOD
+                # rm "$helper/routingQueueConfig_$routing_name.json"
             else
                 cat $TEMPA3
                 aws_connect associate-routing-profile-queues \
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
-                    --queue-configs "file://$TEMPFILE" || error $LINENO
+                    --queue-configs "file://$helper/routingQueueConfig_$routing_name.json" || error $LINENO
 
                 aws_connect list-routing-profile-queues \
                     --instance-id $instance_id_b \
@@ -658,7 +725,13 @@ else
         # Contact Flow Module template file
         # module_template_file=$helper/module_template.json
 
-        echo "Action - Create contact flow module: $module_name" >> "$helper_log"
+        cat "$instance_alias_dir_a/$module_json" |
+        sed -f "$helper_sed" > "$helper/$module_json"
+
+        cat <<EOD >> "$helper_log"
+
+$actionLead Create contact flow module: $module_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create contact flow module
@@ -666,13 +739,17 @@ Dry-create contact flow module
 --name "$module_name"
 
 EOD
+            cat <<EOD >> "$helper_log"
+aws connect create-contact-flow-module \
+--instance-id $instance_id_b \
+--name "$module_name" \
+--content "file://$helper/$module_json" \
+> "$out_file"
+EOD
+            # rm "$helper/$module_json"
             continue
         fi
 
-        cat "$instance_alias_dir_a/$module_json" |
-        sed -f "$helper_sed" > "$helper/$module_json"
-
-            # --content "file://$module_template_file" \
         aws_connect create-contact-flow-module \
             --instance-id $instance_id_b \
             --name "$module_name" \
@@ -742,7 +819,10 @@ else
         cat "$instance_alias_dir_a/$module_json" |
         sed -f "$helper_sed" > "$helper/$module_json"
 
-        echo "Action - Update contact flow module: $module_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Update contact flow module: $module_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-update contact flow module
@@ -750,7 +830,14 @@ Dry-update contact flow module
 --contact-flow-module-id $module_id_b
 
 EOD
-            rm "$helper/$module_json"
+            cat <<EOD >> "$helper_log"
+aws connect update-contact-flow-module-content \
+--instance-id $instance_id_b \
+--contact-flow-module-id $module_id_b \
+--content "file://$helper/$module_json" \
+> "$helper/output_content_$module_json"
+EOD
+            # rm "$helper/$module_json"
             continue
         fi
 
@@ -828,7 +915,10 @@ else
             flow_template_file="$instance_alias_dir_b/flow_Default queue transfer.json";;
         esac
 
-        echo "Action - Create contact flow: $flow_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Create contact flow: $flow_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create contact flow from Template (Default flows)
@@ -836,6 +926,14 @@ Dry-create contact flow from Template (Default flows)
 --name "$flow_name"
 --type $flow_type
 
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect create-contact-flow \
+--instance-id $instance_id_b \
+--name "$flow_name" \
+--type $flow_type \
+--content "file://$flow_template_file" \
+> "$out_file"
 EOD
             continue
         fi
@@ -909,7 +1007,10 @@ else
         cat "$instance_alias_dir_a/$flow_json" |
         sed -f "$helper_sed" > "$helper/$flow_json"
 
-        echo "Action - Update contact flow: $flow_name" >> "$helper_log"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Update contact flow: $flow_name
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-update contact flow
@@ -917,7 +1018,14 @@ Dry-update contact flow
 --contact-flow-id $flow_id_b
 
 EOD
-            rm "$helper/$flow_json"
+            cat <<EOD >> "$helper_log"
+aws connect update-contact-flow-content \
+--instance-id $instance_id_b \
+--contact-flow-id $flow_id_b \
+--content "file://$helper/$flow_json" \
+> "$helper/output_content_$flow_json"
+EOD
+            # rm "$helper/$flow_json"
             continue
         fi
 
@@ -954,11 +1062,25 @@ cat \
 if [ -s $TEMPFILE ]; then
     echo
     echo Associating Lambda functions to $instance_alias_b
+    # Use "aws connect" instead of "aws_connect" to avoid logging
+    aws connect list-lambda-functions \
+        $profile_flag \
+        --instance-id $instance_id_b \
+        > $TEMPOLD || error $LINENO
+    cat $TEMPOLD |
+    jq -r ".LambdaFunctions" > "$helper/lambds.json"
+
     ii=0
     cat $TEMPFILE |
     while read lambdaArn; do
         ii=$[ii+1]
-        echo "$ii. $lambdaArn"
+        echo -n "$ii. $lambdaArn ... "
+        lambdaExist=$(echo $(cat "$helper/lambds.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
+        if [ "$lambdaExist" -gt 0 ]; then
+            echo "already associated"
+            continue
+        fi
+        echo "to be associated"
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-associating lambda function
@@ -966,6 +1088,12 @@ Dry-associating lambda function
 --function-arn $lambdaArn \
 
 
+EOD
+            cat <<EOD >> "$helper_log"
+
+aws connect associate-lambda-function \
+--instance-id $instance_id_b \
+--function-arn $lambdaArn
 EOD
             continue
         fi
@@ -975,17 +1103,18 @@ EOD
     done
 fi
 
-num_actions=$(echo $(egrep "^Action " "$helper_log" | wc -l))
+num_actions=$(echo $(egrep "^$actionLead" "$helper_log" | wc -l))
 echo
 echo "$num_actions actions on the target instance"
 if [ "$num_actions" -eq 0 ]; then
     echo "Target instance is the same as the source instance. No updates are required."
     exit 3
 else
+    echo
     cat "$helper_log"
     echo
     if [ -n "$dryrun" ]; then
-        echo "None were done in Dry-run mode"
+        echo "No actions were carried out in Dry-run mode"
     else
         echo "All done"
     fi

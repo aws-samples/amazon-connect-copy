@@ -114,6 +114,8 @@ Note: All names in Amazon Connect are case sensitive.
       -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
       -?                   Help
   ```
+  - `<instance_alias>` can be a directory path.
+  - `<instance_alias>.log` will be produced by `connect_save`.
 - Run `connect_save <source_instance_alias> <source_profile> <contact_flow_prefix>` .
 - Run `connect_save <target_instance_alias> <target_profile> <contact_flow_prefix>` .
 - Optionally, run `connect_diff` with no arguments to show the help message:
@@ -156,7 +158,10 @@ Note: All names in Amazon Connect are case sensitive.
       -?            Help
   ```
 - Optionally, verify the helper by dry-running `connect_copy -d <helper>` .
-  - Check if the proposed changes are as what you would expect.
+  - Check if the proposed changes are as what you would expect from the output.
+  - AWS CLI commands to execute can be found in `<helper>.log` for your reference.
+  - Please do not run the log file as an executable. Run `connect_copy`
+    without `-d` (dry-run) to perform the actual copying.
 - Run `connect_copy <helper>` .
   - Verify if the target instance contains all source instance components
     of the latest version, with all internal references and Lambda invocations
@@ -211,15 +216,15 @@ Example:
   by anyone during the entire copying process (save, diff and copy).
 - `connect_diff` only creates the helper directory and will not change anything
   in the source and the target instance directories.
-- `connect_copy` will change files in both the target instance directory and
-  the helper directory. (While in dry-run mode, only helper.log will be changed.)
+- `connect_copy` will change files in the helper directory, and when in
+  non-dry-run mode, will change the target instance directory as well.
   i.e., `connect_copy` is not idempotent to the target and helper directory.
 - DO NOT reuse the target instance directory and the helper directory.
   Remove these two directories after copying.
   - If you want to keep a backup of the target instance after copying,
     run `connect_save` again on the target instance.
 - `connect_diff` and `connect_copy` do not change the source instance directory,
-  so it can be served as a backup or as a source to copy to multiple target instances.
+  so the source can serve as a backup or be used to copy to multiple target instances.
 - If relative paths are specified in instance aliases, make sure you are running
   `connect_diff` and `connect_copy` from the same directory, so that `connect_copy`
   will resolve the relative paths correctly.
