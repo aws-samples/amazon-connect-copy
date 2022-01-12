@@ -5,7 +5,7 @@ to the target instance safely, fixing all internal references.
 
 You may use Amazon-Connect-Copy to deploy an Amazon Connect instance across environments
 (AWS accounts or regions), or to save a backup copy of the instance for restoration
-when required, reducing an hours-long error-prone manual job to few minutes of
+when required, reducing an hours-long error-prone manual job to a few minutes of
 automated and reliable processing.
 
 Ids and Arns of components copied from the source instance will be re-mapped to
@@ -20,10 +20,10 @@ their corresponding components in the new instance, including:
 - Contact flow modules
 - Contact flows
 
-These components are not modified by Amazon-Connect-Copy (to avoid any impact on
+The following components are not copied by Amazon-Connect-Copy (to avoid any impact on
 other contact centres that may happen to be using the same target instance):
 
-- Users (agents) related settings
+- Users (agents) related settings, statuses and the hierarchy
 - Security profiles
 - Phone numbers
   - Inbound Contact flow/IVR mappings
@@ -31,12 +31,18 @@ other contact centres that may happen to be using the same target instance):
 - Quick connects
 - Settings for existing queues
   - Note: Settings for new queues will still be copied
+- Historical metrics and reports
+- Contact Trace Records (CTRs)
+- Custom vocabularies
+- Rules for Contact lens and Third-party integration
 
+Amazon-Connect-Copy was designed for deployment across environments
+(e.g., from non-prod to prod).
 Considering the target instance may accommodate multiple contact centres,
 Amazon-Connect-Copy does not remove any target instance components which are
 not found in the source instance. If there are multiple contact centres sharing
 the same Amazon Connect instance, it is a good practice to prefix contact centre
-specific components with their individual Contact Centre Codes (CCC).
+specific components with their individual Contact Centre Codes (CCCs).
 
 ## Installation
 
@@ -50,9 +56,9 @@ specific components with their individual Contact Centre Codes (CCC).
 **Please replace names in the example with names specific to your use case.**
 
 ```
-connect_save source-connect source-profile CCC
-connect_save target-connect target-profile CCC
-connect_diff source-connect target-connect target-helper source- target-
+connect_save source-connect-alias source-profile CCC
+connect_save target-connect-alias target-profile CCC
+connect_diff source-connect-alias target-connect-alias target-helper source- target-
 # Dry run
 connect_copy -d target-helper
 # Real run
@@ -60,7 +66,7 @@ connect_copy target-helper
 ```
 
 In this example:
-- We copy from instance `source-connect` to instance `target-connect`.
+- We copy from instance `source-connect-alias` to instance `target-connect-alias`.
 - Credentials for the source and target instances are in AWS profiles
   `source-profile` and `target-profile` respectively.
 - You may use the same profile for `source-profile` and `target-profile`,
@@ -87,7 +93,7 @@ Note: All names in Amazon Connect are case sensitive.
 - Upload all required prompts to the target instance.
   - The prompt names need to be *exactly* the same as their counterparts
     in the source instance.
-- For an incremental instance change, if there are contact flow or module name changes,
+- For an incremental instance update with contact flow or module name changes,
   before the copying please manually change the corresponding flow or module names in
   the *target* instance. Otherwise, contact flows and modules with new names will
   be created in the target instance, and those with old names will be left untouched.
