@@ -28,6 +28,8 @@ usage() { echo -e "$USAGE" >&2; exit 2; }
 
 error() { echo -e "Error: $1" >&2; exit 1; }
 
+path_encode() { echo "$*" | sed -e's/\//%2F/g'; }
+
 add_file() {
     alias_dir="$1"
     file_suffix="$2"
@@ -262,11 +264,12 @@ test $? -eq 0 || error
 echo Checking Contact Flow Modules ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/modules.json" |
 while read module_id_a module_name; do
+    module_name_encoded=$(path_encode $module_name)
     module_id_b=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_b/modules.json")
     if [ -z "$module_id_b" ]; then
-        add_file "$instance_alias_dir_a" "module_$module_name.json" $helper_new
+        add_file "$instance_alias_dir_a" "module_$module_name_encoded.json" $helper_new
     else
-        add_file "$instance_alias_dir_b" "module_$module_name.json" $helper_old
+        add_file "$instance_alias_dir_b" "module_$module_name_encoded.json" $helper_old
         cat <<EOD >> $helper_sed
 # Contact Flow Module: $module_name
 s%$module_id_a%$module_id_b%g
@@ -285,10 +288,11 @@ echo Checking Contact Flows ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/flows.json" |
 while read flow_id_a flow_name; do
     flow_id_b=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_b/flows.json")
+    flow_name_encoded=$(path_encode $flow_name)
     if [ -z "$flow_id_b" ]; then
-        add_file "$instance_alias_dir_a" "flow_$flow_name.json" $helper_new
+        add_file "$instance_alias_dir_a" "flow_$flow_name_encoded.json" $helper_new
     else
-        add_file "$instance_alias_dir_b" "flow_$flow_name.json" $helper_old
+        add_file "$instance_alias_dir_b" "flow_$flow_name_encoded.json" $helper_old
         cat <<EOD >> $helper_sed
 # Contact Flow: $flow_name
 s%$flow_id_a%$flow_id_b%g

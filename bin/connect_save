@@ -55,6 +55,8 @@ EOD
     exit 1
 }
 
+path_encode() { echo "$*" | sed -e's/\//%2F/g'; }
+
 # # A workaround for contact flow modules created before 1 Dec 2021.
 # fix_module_json() {
 #     # A workaround for AWS CLI failed to create contact flow modules
@@ -127,7 +129,7 @@ profile_flag=${profile:+ --profile $profile}
 
 contact_flow_prefix=$3
 contact_flow_prefix_filter=${contact_flow_prefix:+" | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))"}
-contact_flow_prefix_text="${contact_flow_prefix:+ with names prefixed with \"$contact_flow_prefix\"}"
+contact_flow_prefix_text="${contact_flow_prefix:+ with names prefixed with \"$contact_flow_prefix\" or Default}"
 
 if [ -z "$instance_alias_dir" ]; then
     usage
@@ -312,6 +314,7 @@ cat "$instance_alias_dir/modules.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
 while read module_id module_name; do
     echo "Exporting contact flow module $module_name"
+    module_name_encoded=$(path_encode $module_name)
     aws_connect describe-contact-flow-module \
         --instance-id $instance_id \
         --contact-flow-module-id $module_id > $TEMPCF \
@@ -328,8 +331,8 @@ while read module_id module_name; do
         fi
         if [ -s $TEMPCF ]; then
             cat $TEMPCF |
-            jq -r '.ContactFlowModule.Content' > "$instance_alias_dir/module_$module_name.json"
-            # fix_module_json "$instance_alias_dir/module_$module_name.json"
+            jq -r '.ContactFlowModule.Content' > "$instance_alias_dir/module_$module_name_encoded.json"
+            # fix_module_json "$instance_alias_dir/module_$module_name_encoded.json"
         fi
     fi
 done
@@ -366,9 +369,10 @@ while read flow_id flow_name; do
         --instance-id $instance_id \
         --contact-flow-id $flow_id > $TEMPCF \
         || error $LINENO "$flow_name" "$instance_alias_dir/flows.json"
+    flow_name_encoded=$(path_encode $flow_name)
     if [ -s $TEMPCF ]; then
         cat $TEMPCF |
-        jq -r '.ContactFlow.Content' > "$instance_alias_dir/flow_$flow_name.json"
+        jq -r '.ContactFlow.Content' > "$instance_alias_dir/flow_$flow_name_encoded.json"
     fi
 done
 test $? -eq 0 || error

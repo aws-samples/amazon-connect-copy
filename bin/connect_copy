@@ -39,6 +39,8 @@ EOD
     exit 1
 }
 
+path_decode() { echo "$*" | sed -e's/%2F/\//g'; }
+
 diff_files() {
     # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
     # If same, return 0. If different, show the difference unsorted,
@@ -718,8 +720,9 @@ else
         echo "$ii. $module_json"
         module_name=${module_json#module_}
         module_name=${module_name%.json}
+        module_name_decoded=$(path_decode $module_name)
 
-        module_id_a=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_a/modules.json")
+        module_id_a=$(jq -r "select(.Name == \"$module_name_decoded\") | .Id" "$instance_alias_dir_a/modules.json")
         out_file="$helper/output_$module_json"
 
         # Contact Flow Module template file
@@ -730,19 +733,19 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Create contact flow module: $module_name
+$actionLead Create contact flow module: $module_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create contact flow module
 --instance-id $instance_id_b
---name "$module_name"
+--name "$module_name_decoded"
 
 EOD
             cat <<EOD >> "$helper_log"
 aws connect create-contact-flow-module \
 --instance-id $instance_id_b \
---name "$module_name" \
+--name "$module_name_decoded" \
 --content "file://$helper/$module_json" \
 > "$out_file"
 EOD
@@ -752,7 +755,7 @@ EOD
 
         aws_connect create-contact-flow-module \
             --instance-id $instance_id_b \
-            --name "$module_name" \
+            --name "$module_name_decoded" \
             --content "file://$helper/$module_json" \
             > "$out_file" || error $LINENO
         module_id_b=$(jq -r ".Id" "$out_file")
@@ -773,7 +776,7 @@ EOD
         cat $TEMPFILE > "$helper_new"
 
         cat <<EOD >> "$helper_sed"
-# Contact Flow Module: $module_name
+# Contact Flow Module: $module_name_decoded
 s%$module_id_a%$module_id_b%g
 EOD
     done
@@ -809,8 +812,9 @@ else
         echo -n "$ii. $module_json ... "
         module_name=${module_json#module_}
         module_name=${module_name%.json}
+        module_name_decoded=$(path_decode $module_name)
 
-        module_id_b=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_b/modules.json")
+        module_id_b=$(jq -r "select(.Name == \"$module_name_decoded\") | .Id" "$instance_alias_dir_b/modules.json")
 
         cat "$instance_alias_dir_a/$module_json" > $TEMPA
         cat "$instance_alias_dir_b/$module_json" > $TEMPB
@@ -821,7 +825,7 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Update contact flow module: $module_name
+$actionLead Update contact flow module: $module_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
@@ -890,8 +894,9 @@ else
         echo "$ii. $flow_json"
         flow_name=${flow_json#flow_}
         flow_name=${flow_name%.json}
-        flow_type=$(jq -r "select(.Name == \"$flow_name\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
-        flow_id_a=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_a/flows.json")
+        flow_name_decoded=$(path_decode $flow_name)
+        flow_type=$(jq -r "select(.Name == \"$flow_name_decoded\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
+        flow_id_a=$(jq -r "select(.Name == \"$flow_name_decoded\") | .Id" "$instance_alias_dir_a/flows.json")
         out_file="$helper/output_$flow_json"
 
         # Contact Flow template file
@@ -917,20 +922,20 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Create contact flow: $flow_name
+$actionLead Create contact flow: $flow_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-create contact flow from Template (Default flows)
 --instance-id $instance_id_b
---name "$flow_name"
+--name "$flow_name_decoded"
 --type $flow_type
 
 EOD
             cat <<EOD >> "$helper_log"
 aws connect create-contact-flow \
 --instance-id $instance_id_b \
---name "$flow_name" \
+--name "$flow_name_decoded" \
 --type $flow_type \
 --content "file://$flow_template_file" \
 > "$out_file"
@@ -940,7 +945,7 @@ EOD
 
         aws_connect create-contact-flow \
             --instance-id $instance_id_b \
-            --name "$flow_name" \
+            --name "$flow_name_decoded" \
             --type $flow_type \
             --content "file://$flow_template_file" \
             > "$out_file" || error $LINENO
@@ -962,7 +967,7 @@ EOD
         cat $TEMPFILE > "$helper_new"
 
         cat <<EOD >> "$helper_sed"
-# Contact Flow: $flow_name
+# Contact Flow: $flow_name_decoded
 s%$flow_id_a%$flow_id_b%g
 EOD
     done
@@ -998,7 +1003,8 @@ else
         echo -n "$ii. $flow_json ... "
         flow_name=${flow_json#flow_}
         flow_name=${flow_name%.json}
-        flow_id_b=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_b/flows.json")
+        flow_name_decoded=$(path_decode $flow_name)
+        flow_id_b=$(jq -r "select(.Name == \"$flow_name_decoded\") | .Id" "$instance_alias_dir_b/flows.json")
 
         cat "$instance_alias_dir_a/$flow_json" > $TEMPA
         cat "$instance_alias_dir_b/$flow_json" > $TEMPB
@@ -1009,7 +1015,7 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Update contact flow: $flow_name
+$actionLead Update contact flow: $flow_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
