@@ -55,7 +55,19 @@ EOD
     exit 1
 }
 
-path_encode() { echo "$*" | sed -e's/\//%2F/g'; }
+path_encode()  {
+    old_lc_collate=$LC_COLLATE
+    LC_COLLATE=C
+    local length="${#1}"
+    for (( i = 0; i < length; i++ )); do
+        local c="${1:$i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf '%s' "$c";;
+            *) printf '%%%02X' "'$c";;
+        esac
+    done
+    LC_COLLATE=$old_lc_collate
+}
 
 # # A workaround for contact flow modules created before 1 Dec 2021.
 # fix_module_json() {
@@ -87,7 +99,7 @@ aws_connect() {
         [[ "$ii" == *" "* ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
     done
     echo "aws connect$profile_flag$cmd" >> "$aws_cli_log"
-    eval aws connect$profile_flag$cmd 2> $TEMPERR
+    eval "aws connect$profile_flag$cmd" 2> $TEMPERR
     local ret=$?
     if [ -s $TEMPERR ]; then
         cat $TEMPERR | tee -a "$aws_cli_log" >&2
@@ -221,10 +233,11 @@ echo -e "\n$(jq -s "length") hours of operations listed in \"$instance_alias_dir
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/hours.json" |
 while read hour_id hour_name; do
     echo "Exporting hours of operation $hour_name"
+    hour_name_encoded=$(path_encode "$hour_name")
     aws_connect describe-hours-of-operation \
         --instance-id $instance_id \
         --hours-of-operation-id $hour_id \
-        > "$instance_alias_dir/hour_$hour_name.json" || error $LINENO
+        > "$instance_alias_dir/hour_$hour_name_encoded.json" || error $LINENO
 done
 test $? -eq 0 || error
 
@@ -248,10 +261,11 @@ echo -e "\n$(jq -s "length") queues listed in \"$instance_alias_dir/queues.json\
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/queues.json" |
 while read queue_id queue_name; do
     echo "Exporting queue $queue_name"
+    queue_name_encoded=$(path_encode "$queue_name")
     aws_connect describe-queue \
         --instance-id $instance_id \
         --queue-id $queue_id \
-        > "$instance_alias_dir/queue_$queue_name.json" || error $LINENO
+        > "$instance_alias_dir/queue_$queue_name_encoded.json" || error $LINENO
 done
 test $? -eq 0 || error
 
@@ -275,15 +289,16 @@ echo -e "\n$(jq -s "length") routing profiles listed in \"$instance_alias_dir/ro
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/routings.json" |
 while read routing_id routing_name; do
     echo "Exporting routing profile $routing_name"
+    routing_name_encoded=$(path_encode "$routing_name")
     aws_connect describe-routing-profile \
         --instance-id $instance_id \
         --routing-profile-id $routing_id \
-        > "$instance_alias_dir/routing_$routing_name.json" || error $LINENO
+        > "$instance_alias_dir/routing_$routing_name_encoded.json" || error $LINENO
     aws_connect list-routing-profile-queues \
         --instance-id $instance_id \
         --routing-profile-id $routing_id \
         --max-items $maxitems \
-        > "$instance_alias_dir/routingQs_$routing_name.json" || error $LINENO
+        > "$instance_alias_dir/routingQs_$routing_name_encoded.json" || error $LINENO
 done
 test $? -eq 0 || error
 
@@ -314,7 +329,7 @@ cat "$instance_alias_dir/modules.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
 while read module_id module_name; do
     echo "Exporting contact flow module $module_name"
-    module_name_encoded=$(path_encode $module_name)
+    module_name_encoded=$(path_encode "$module_name")
     aws_connect describe-contact-flow-module \
         --instance-id $instance_id \
         --contact-flow-module-id $module_id > $TEMPCF \
@@ -369,7 +384,7 @@ while read flow_id flow_name; do
         --instance-id $instance_id \
         --contact-flow-id $flow_id > $TEMPCF \
         || error $LINENO "$flow_name" "$instance_alias_dir/flows.json"
-    flow_name_encoded=$(path_encode $flow_name)
+    flow_name_encoded=$(path_encode "$flow_name")
     if [ -s $TEMPCF ]; then
         cat $TEMPCF |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir/flow_$flow_name_encoded.json"

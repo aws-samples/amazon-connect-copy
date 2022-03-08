@@ -28,7 +28,19 @@ usage() { echo -e "$USAGE" >&2; exit 2; }
 
 error() { echo -e "Error: $1" >&2; exit 1; }
 
-path_encode() { echo "$*" | sed -e's/\//%2F/g'; }
+path_encode()  {
+    old_lc_collate=$LC_COLLATE
+    LC_COLLATE=C
+    local length="${#1}"
+    for (( i = 0; i < length; i++ )); do
+        local c="${1:$i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf '%s' "$c";;
+            *) printf '%%%02X' "'$c";;
+        esac
+    done
+    LC_COLLATE=$old_lc_collate
+}
 
 add_file() {
     alias_dir="$1"
@@ -171,7 +183,9 @@ echo
 echo Checking Prompts ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/prompts.json" |
 while read prompt_id_a prompt_name; do
-    prompt_id_b=$(jq -r "select(.Name == \"$prompt_name\") | .Id" "$instance_alias_dir_b/prompts.json")
+    prompt_name_encoded=$(path_encode "$prompt_name")
+    # prompt_id_b=$(jq -r "select(.Name == \"${prompt_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/prompts.json")
+    prompt_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/prompts.json" | jq -r "select(.Name == \"${prompt_name//\"/%22}\") | .Id")
     if [ -z "$prompt_id_b" ]; then
         echo "prompt_$prompt_name" >> $helper_new
     else
@@ -193,11 +207,13 @@ test $? -eq 0 || error
 echo Checking House of operations ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/hours.json" |
 while read hour_id_a hour_name; do
-    hour_id_b=$(jq -r "select(.Name == \"$hour_name\") | .Id" "$instance_alias_dir_b/hours.json")
+    hour_name_encoded=$(path_encode "$hour_name")
+    # hour_id_b=$(jq -r "select(.Name == \"${hour_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/hours.json")
+    hour_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/hours.json" | jq -r "select(.Name == \"${hour_name//\"/%22}\") | .Id")
     if [ -z "$hour_id_b" ]; then
-        add_file "$instance_alias_dir_a" "hour_$hour_name.json" $helper_new
+        add_file "$instance_alias_dir_a" "hour_$hour_name_encoded.json" $helper_new
     else
-        add_file "$instance_alias_dir_b" "hour_$hour_name.json" $helper_old
+        add_file "$instance_alias_dir_b" "hour_$hour_name_encoded.json" $helper_old
         cat <<EOD >> $helper_sed
 # Hour of operation: $hour_name
 s%$hour_id_a%$hour_id_b%g
@@ -215,11 +231,13 @@ test $? -eq 0 || error
 echo Checking Queues ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/queues.json" |
 while read queue_id_a queue_name; do
-    queue_id_b=$(jq -r "select(.Name == \"$queue_name\") | .Id" "$instance_alias_dir_b/queues.json")
+    queue_name_encoded=$(path_encode "$queue_name")
+    # queue_id_b=$(jq -r "select(.Name == \"${queue_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/queues.json")
+    queue_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/queues.json" | jq -r "select(.Name == \"${queue_name//\"/%22}\") | .Id")
     if [ -z "$queue_id_b" ]; then
-        add_file "$instance_alias_dir_a" "queue_$queue_name.json" $helper_new
+        add_file "$instance_alias_dir_a" "queue_$queue_name_encoded.json" $helper_new
     else
-        add_file "$instance_alias_dir_b" "queue_$queue_name.json" $helper_old
+        add_file "$instance_alias_dir_b" "queue_$queue_name_encoded.json" $helper_old
         cat <<EOD >> $helper_sed
 # Queue: $queue_name
 s%$queue_id_a%$queue_id_b%g
@@ -240,13 +258,15 @@ while read routing_id_a routing_name; do
     if [ "$routing_name" == "$routing_profile_to_ignore" ]; then
         continue
     fi
-    routing_id_b=$(jq -r "select(.Name == \"$routing_name\") | .Id" "$instance_alias_dir_b/routings.json")
+    routing_name_encoded=$(path_encode "$routing_name")
+    # routing_id_b=$(jq -r "select(.Name == \"${routing_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/routings.json")
+    routing_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/routings.json" | jq -r "select(.Name == \"${routing_name//\"/%22}\") | .Id")
     if [ -z "$routing_id_b" ]; then
-        add_file "$instance_alias_dir_a" "routing_$routing_name.json" $helper_new
-        add_file "$instance_alias_dir_a" "routingQs_$routing_name.json" $helper_new
+        add_file "$instance_alias_dir_a" "routing_$routing_name_encoded.json" $helper_new
+        add_file "$instance_alias_dir_a" "routingQs_$routing_name_encoded.json" $helper_new
     else
-        add_file "$instance_alias_dir_b" "routing_$routing_name.json" $helper_old
-        add_file "$instance_alias_dir_b" "routingQs_$routing_name.json" $helper_old
+        add_file "$instance_alias_dir_b" "routing_$routing_name_encoded.json" $helper_old
+        add_file "$instance_alias_dir_b" "routingQs_$routing_name_encoded.json" $helper_old
         cat <<EOD >> $helper_sed
 # Routing Profile: $routing_name
 s%$routing_id_a%$routing_id_b%g
@@ -264,8 +284,9 @@ test $? -eq 0 || error
 echo Checking Contact Flow Modules ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/modules.json" |
 while read module_id_a module_name; do
-    module_name_encoded=$(path_encode $module_name)
-    module_id_b=$(jq -r "select(.Name == \"$module_name\") | .Id" "$instance_alias_dir_b/modules.json")
+    module_name_encoded=$(path_encode "$module_name")
+    # module_id_b=$(jq -r "select(.Name == \"${module_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/modules.json")
+    module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name//\"/%22}\") | .Id")
     if [ -z "$module_id_b" ]; then
         add_file "$instance_alias_dir_a" "module_$module_name_encoded.json" $helper_new
     else
@@ -287,8 +308,9 @@ test $? -eq 0 || error
 echo Checking Contact Flows ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/flows.json" |
 while read flow_id_a flow_name; do
-    flow_id_b=$(jq -r "select(.Name == \"$flow_name\") | .Id" "$instance_alias_dir_b/flows.json")
-    flow_name_encoded=$(path_encode $flow_name)
+    # flow_id_b=$(jq -r "select(.Name == \"${flow_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/flows.json")
+    flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name//\"/%22}\") | .Id")
+    flow_name_encoded=$(path_encode "$flow_name")
     if [ -z "$flow_id_b" ]; then
         add_file "$instance_alias_dir_a" "flow_$flow_name_encoded.json" $helper_new
     else

@@ -39,7 +39,24 @@ EOD
     exit 1
 }
 
-path_decode() { echo "$*" | sed -e's/%2F/\//g'; }
+path_encode()  {
+    old_lc_collate=$LC_COLLATE
+    LC_COLLATE=C
+    local length="${#1}"
+    for (( i = 0; i < length; i++ )); do
+        local c="${1:$i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf '%s' "$c";;
+            *) printf '%%%02X' "'$c";;
+        esac
+    done
+    LC_COLLATE=$old_lc_collate
+}
+
+path_decode() {
+    local path_encoded="${1//+/ }"
+    printf '%b' "${path_encoded//%/\\x}"
+}
 
 diff_files() {
     # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
@@ -62,7 +79,7 @@ aws_connect() {
         [[ "$ii" == *" "* ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
     done
     echo "aws connect$profile_flag$cmd" >> "$aws_cli_log"
-    eval aws connect$profile_flag$cmd 2> $TEMPERR
+    eval "aws connect$profile_flag$cmd" 2> $TEMPERR
     local ret=$?
     if [ -s $TEMPERR ]; then
         cat $TEMPERR | tee -a "$aws_cli_log" >&2
@@ -117,6 +134,7 @@ AWS Profile B in use: ${profile:-${AWS_PROFILE:-(default)}}
 Context Flow Prefix: $contact_flow_prefix
 EOD
 
+contact_flow_prefix_encoded=$(path_encode "$contact_flow_prefix")
 contact_flow_prefix_text="${contact_flow_prefix:+ with names prefixed with \"$contact_flow_prefix\"}"
 
 helper_older_than=
@@ -196,17 +214,24 @@ else
         echo "$ii. $hour_json"
         hour_name=${hour_json#hour_}
         hour_name=${hour_name%.json}
+        hour_name_decoded=$(path_decode "$hour_name")
 
         hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json")
 
+        # Description cannot be blank, or the AWS CLI will fail.
+        hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json")
+        if [ -z "$hour_desc" ]; then
+            hour_desc=$hour_name_decoded
+        fi
+
         cat "$instance_alias_dir_a/$hour_json" |
-        jq --arg iid $instance_id_b \
-            ".HoursOfOperation | del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid}" |
+        jq --arg iid $instance_id_b --arg desc "$hour_desc" \
+            ".HoursOfOperation | del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid} | . + { Description: \$desc}" |
             sed -f "$helper_sed" > "$helper/$hour_json"
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Create hours of operation: $hour_name
+$actionLead Create hours of operation: $hour_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
@@ -239,7 +264,7 @@ EOD
         cat $TEMPFILE > "$helper_new"
 
         cat <<EOD >> "$helper_sed"
-# Hour of operation: $hour_name
+# Hour of operation: $hour_name_decoded
 s%$hour_id_a%$hour_id_b%g
 EOD
     done
@@ -267,6 +292,7 @@ else
         echo -n "$ii. $hour_json ... "
         hour_name=${hour_json#hour_}
         hour_name=${hour_name%.json}
+        hour_name_decoded=$(path_decode "$hour_name")
         cat "$instance_alias_dir_a/$hour_json" > $TEMPA
         cat "$instance_alias_dir_b/$hour_json" > $TEMPB
         df=$(diff_files); echo $df; test "$df" == "same" && continue
@@ -282,7 +308,7 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Update hours of operation: $hour_name
+$actionLead Update hours of operation: $hour_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
@@ -338,6 +364,7 @@ else
         echo "$ii. $queue_json"
         queue_name=${queue_json#queue_}
         queue_name=${queue_name%.json}
+        queue_name_decoded=$(path_decode "$queue_name")
 
         queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json")
 
@@ -348,7 +375,7 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Create queue: $queue_name
+$actionLead Create queue: $queue_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
@@ -381,7 +408,7 @@ EOD
         cat $TEMPFILE > "$helper_new"
 
         cat <<EOD >> "$helper_sed"
-# Queue: $queue_name
+# Queue: $queue_name_decoded
 s%$queue_id_a%$queue_id_b%g
 EOD
     done
@@ -483,6 +510,7 @@ else
         echo "$ii. $routing_json"
         routing_name=${routing_json#routing_}
         routing_name=${routing_name%.json}
+        routing_name_decoded=$(path_decode "$routing_name")
 
         routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json")
         routing_new_file=$(gen_helper_routing_new "$routing_name")
@@ -490,7 +518,7 @@ else
 
         cat <<EOD >> "$helper_log"
 
-$actionLead Create routing profile: $routing_name
+$actionLead Create routing profile: $routing_name_decoded
 EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
@@ -531,7 +559,7 @@ EOD
         cat $TEMPFILE > "$helper_new"
 
         cat <<EOD >> "$helper_sed"
-# Routing Profile: $routing_name
+# Routing Profile: $routing_name_decoded
 s%$routing_id_a%$routing_id_b%g
 EOD
     done
@@ -560,6 +588,7 @@ else
         echo -n "$ii. $routing_json ... "
         routing_name=${routing_json#routing_}
         routing_name=${routing_name%.json}
+        routing_name_decoded=$(path_decode "$routing_name")
 
         cat "$instance_alias_dir_a/$routing_json" |
         jq "del(.RoutingProfile.MediaConcurrencies[] | select(.Concurrency == 0))" > $TEMPA
@@ -602,7 +631,7 @@ else
 
             cat <<EOD >> "$helper_log"
 
-$actionLead Update routing profile: $routing_name
+$actionLead Update routing profile: $routing_decoded
 EOD
             if [ -n "$dryrun" ]; then
                 cat <<EOD
@@ -652,18 +681,20 @@ EOD
             diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" |
             tee $TEMPA3 |
             while read q_name; do
-                cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"$q_name\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
+                # cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                #     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/\\\"}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
+                sed -e's/\\"/%22/g' "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/%22}}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
             done
             cat $TEMPA2 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
 
             cat <<EOD >> "$helper_log"
 
-$actionLead Associate queues to routing profile: $routing_name
+$actionLead Associate queues to routing profile: $routing_name_decoded
 EOD
             if [ -n "$dryrun" ]; then
                 cat <<EOD
-Dry-associate queues to routing profile $routing_name
+Dry-associate queues to routing profile $routing_name_decoded
 $(cat $TEMPA3)
 $(cat $TEMPFILE)
 
@@ -705,9 +736,9 @@ Contact Flow Modules Creation
 EOD
 
 # Preload as $helper_old may change
-egrep "^module_$contact_flow_prefix" "$helper_old" > $TEMPOLD
+egrep "^module_$contact_flow_prefix_encoded" "$helper_old" > $TEMPOLD
 # Create what is in $helper_new
-egrep "^module_$contact_flow_prefix" "$helper_new" > $TEMPNEW
+egrep "^module_$contact_flow_prefix_encoded" "$helper_new" > $TEMPNEW
 if [ ! -s $TEMPNEW ]; then
     echo "No contact flow modules$contact_flow_prefix_text to create"
 else
@@ -720,9 +751,10 @@ else
         echo "$ii. $module_json"
         module_name=${module_json#module_}
         module_name=${module_name%.json}
-        module_name_decoded=$(path_decode $module_name)
+        module_name_decoded=$(path_decode "$module_name")
 
-        module_id_a=$(jq -r "select(.Name == \"$module_name_decoded\") | .Id" "$instance_alias_dir_a/modules.json")
+        # module_id_a=$(jq -r "select(.Name == \"${module_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/modules.json")
+        module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
         out_file="$helper/output_$module_json"
 
         # Contact Flow Module template file
@@ -739,13 +771,13 @@ EOD
             cat <<EOD
 Dry-create contact flow module
 --instance-id $instance_id_b
---name "$module_name_decoded"
+--name "${module_name_decoded//\"/\\\"}"
 
 EOD
             cat <<EOD >> "$helper_log"
 aws connect create-contact-flow-module \
 --instance-id $instance_id_b \
---name "$module_name_decoded" \
+--name "${module_name_decoded//\"/\\\"}" \
 --content "file://$helper/$module_json" \
 > "$out_file"
 EOD
@@ -755,7 +787,7 @@ EOD
 
         aws_connect create-contact-flow-module \
             --instance-id $instance_id_b \
-            --name "$module_name_decoded" \
+            --name "${module_name_decoded//\"/\\\"}" \
             --content "file://$helper/$module_json" \
             > "$out_file" || error $LINENO
         module_id_b=$(jq -r ".Id" "$out_file")
@@ -812,9 +844,10 @@ else
         echo -n "$ii. $module_json ... "
         module_name=${module_json#module_}
         module_name=${module_name%.json}
-        module_name_decoded=$(path_decode $module_name)
+        module_name_decoded=$(path_decode "$module_name")
 
-        module_id_b=$(jq -r "select(.Name == \"$module_name_decoded\") | .Id" "$instance_alias_dir_b/modules.json")
+        # module_id_b=$(jq -r "select(.Name == \"${module_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_b/modules.json")
+        module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
 
         cat "$instance_alias_dir_a/$module_json" > $TEMPA
         cat "$instance_alias_dir_b/$module_json" > $TEMPB
@@ -879,9 +912,9 @@ Contact Flows Creation
 EOD
 
 # Preload as $helper_old may change
-egrep "^flow_$contact_flow_prefix" "$helper_old" | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
+egrep "^flow_$contact_flow_prefix_encoded" "$helper_old" | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
 # Create what is in $helper_new
-egrep "^flow_$contact_flow_prefix" "$helper_new" > $TEMPNEW
+egrep "^flow_$contact_flow_prefix_encoded" "$helper_new" > $TEMPNEW
 if [ ! -s $TEMPNEW ]; then
     echo "No contact flows$contact_flow_prefix_text to create"
 else
@@ -894,9 +927,11 @@ else
         echo "$ii. $flow_json"
         flow_name=${flow_json#flow_}
         flow_name=${flow_name%.json}
-        flow_name_decoded=$(path_decode $flow_name)
-        flow_type=$(jq -r "select(.Name == \"$flow_name_decoded\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
-        flow_id_a=$(jq -r "select(.Name == \"$flow_name_decoded\") | .Id" "$instance_alias_dir_a/flows.json")
+        flow_name_decoded=$(path_decode "$flow_name")
+        # flow_type=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
+        flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType")
+        # flow_id_a=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/flows.json")
+        flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
         out_file="$helper/output_$flow_json"
 
         # Contact Flow template file
@@ -928,14 +963,14 @@ EOD
             cat <<EOD
 Dry-create contact flow from Template (Default flows)
 --instance-id $instance_id_b
---name "$flow_name_decoded"
+--name "${flow_name_decoded//\"/\\\"}"
 --type $flow_type
 
 EOD
             cat <<EOD >> "$helper_log"
 aws connect create-contact-flow \
 --instance-id $instance_id_b \
---name "$flow_name_decoded" \
+--name "${flow_name_decoded//\"/\\\"}" \
 --type $flow_type \
 --content "file://$flow_template_file" \
 > "$out_file"
@@ -945,7 +980,7 @@ EOD
 
         aws_connect create-contact-flow \
             --instance-id $instance_id_b \
-            --name "$flow_name_decoded" \
+            --name "${flow_name_decoded//\"/\\\"}" \
             --type $flow_type \
             --content "file://$flow_template_file" \
             > "$out_file" || error $LINENO
@@ -1003,8 +1038,9 @@ else
         echo -n "$ii. $flow_json ... "
         flow_name=${flow_json#flow_}
         flow_name=${flow_name%.json}
-        flow_name_decoded=$(path_decode $flow_name)
-        flow_id_b=$(jq -r "select(.Name == \"$flow_name_decoded\") | .Id" "$instance_alias_dir_b/flows.json")
+        flow_name_decoded=$(path_decode "$flow_name")
+        # flow_id_b=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_b/flows.json")
+        flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
 
         cat "$instance_alias_dir_a/$flow_json" > $TEMPA
         cat "$instance_alias_dir_b/$flow_json" > $TEMPB
@@ -1059,8 +1095,8 @@ fi
 
 lambdaArnLead=arn:aws:lambda:$region_b:$aws_ac_b:function:
 cat \
-    "$instance_alias_dir_b/flow_${contact_flow_prefix}"* \
-    "$instance_alias_dir_b/module_${contact_flow_prefix}"* 2> /dev/null |
+    "$instance_alias_dir_b/flow_${contact_flow_prefix_encoded}"* \
+    "$instance_alias_dir_b/module_${contact_flow_prefix_encoded}"* 2> /dev/null |
     jq -r ".Actions[] | select(.Type == \"InvokeLambdaFunction\") | .Parameters.LambdaFunctionARN" |
     grep "$lambdaArnLead" |
     sort -u > $TEMPFILE
@@ -1117,7 +1153,7 @@ if [ "$num_actions" -eq 0 ]; then
     exit 3
 else
     echo
-    cat "$helper_log"
+    echo "The AWS CLI commands carrying out such actions can be found in: $helper_log"
     echo
     if [ -n "$dryrun" ]; then
         echo "No actions were carried out in Dry-run mode"
