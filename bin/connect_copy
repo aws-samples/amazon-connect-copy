@@ -938,21 +938,21 @@ else
         flow_template_file=$helper/flow_template.json
         case "$flow_type" in
         CUSTOMER_QUEUE)
-            flow_template_file="$instance_alias_dir_b/flow_Default customer queue.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20customer%20queue.json";;
         CUSTOMER_HOLD)
-            flow_template_file="$instance_alias_dir_b/flow_Default customer hold.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20customer%20hold.json";;
         CUSTOMER_WHISPER)
-            flow_template_file="$instance_alias_dir_b/flow_Default customer whisper.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20customer%20whisper.json";;
         AGENT_HOLD)
-            flow_template_file="$instance_alias_dir_b/flow_Default agent hold.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20agent%20hold.json";;
         AGENT_WHISPER)
-            flow_template_file="$instance_alias_dir_b/flow_Default agent whisper.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20agent%20whisper.json";;
         OUTBOUND_WHISPER)
-            flow_template_file="$instance_alias_dir_b/flow_Default outbound.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20outbound.json";;
         AGENT_TRANSFER)
-            flow_template_file="$instance_alias_dir_b/flow_Default agent transfer.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20agent%20transfer.json";;
         QUEUE_TRANSFER)
-            flow_template_file="$instance_alias_dir_b/flow_Default queue transfer.json";;
+            flow_template_file="$instance_alias_dir_b/flow_Default%20queue%20transfer.json";;
         esac
 
         cat <<EOD >> "$helper_log"
