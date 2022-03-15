@@ -76,7 +76,7 @@ aws_connect() {
     local cmd=""
     local ii
     for ii; do
-        [[ "$ii" == *" "* ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
+        [[ "$ii" =~ " " || "$ii" =~ "(" || "$ii" =~ ")" ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
     done
     echo "aws connect$profile_flag$cmd" >> "$aws_cli_log"
     eval "aws connect$profile_flag$cmd" 2> $TEMPERR
