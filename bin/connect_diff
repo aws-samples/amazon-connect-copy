@@ -36,7 +36,7 @@ path_encode()  {
         local c="${1:$i:1}"
         case $c in
             [a-zA-Z0-9.~_-]) printf '%s' "$c";;
-            *) printf '%%%02X' "'$c";;
+            *) x=$(printf '%%%02X' "'$c"); echo -n ${x//%0D/};;
         esac
     done
     LC_COLLATE=$old_lc_collate
@@ -182,6 +182,7 @@ echo
 
 echo Checking Prompts ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/prompts.json" |
+tr -d '\r' |
 while read prompt_id_a prompt_name; do
     prompt_name_encoded=$(path_encode "$prompt_name")
     # prompt_id_b=$(jq -r "select(.Name == \"${prompt_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/prompts.json")
@@ -204,8 +205,9 @@ test $? -eq 0 || error
 # Hours of operations
 #
 
-echo Checking House of operations ...
+echo Checking Hours of operations ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/hours.json" |
+tr -d '\r' |
 while read hour_id_a hour_name; do
     hour_name_encoded=$(path_encode "$hour_name")
     # hour_id_b=$(jq -r "select(.Name == \"${hour_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/hours.json")
@@ -230,6 +232,7 @@ test $? -eq 0 || error
 
 echo Checking Queues ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/queues.json" |
+tr -d '\r' |
 while read queue_id_a queue_name; do
     queue_name_encoded=$(path_encode "$queue_name")
     # queue_id_b=$(jq -r "select(.Name == \"${queue_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/queues.json")
@@ -254,6 +257,7 @@ test $? -eq 0 || error
 
 echo Checking Routing Profiles ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/routings.json" |
+tr -d '\r' |
 while read routing_id_a routing_name; do
     if [ "$routing_name" == "$routing_profile_to_ignore" ]; then
         continue
@@ -283,6 +287,7 @@ test $? -eq 0 || error
 
 echo Checking Contact Flow Modules ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/modules.json" |
+tr -d '\r' |
 while read module_id_a module_name; do
     module_name_encoded=$(path_encode "$module_name")
     # module_id_b=$(jq -r "select(.Name == \"${module_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/modules.json")
@@ -307,6 +312,7 @@ test $? -eq 0 || error
 
 echo Checking Contact Flows ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/flows.json" |
+tr -d '\r' |
 while read flow_id_a flow_name; do
     # flow_id_b=$(jq -r "select(.Name == \"${flow_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/flows.json")
     flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name//\"/%22}\") | .Id")
