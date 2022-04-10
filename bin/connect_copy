@@ -47,7 +47,7 @@ path_encode()  {
         local c="${1:$i:1}"
         case $c in
             [a-zA-Z0-9.~_-]) printf '%s' "$c";;
-            *) x=$(printf '%%%02X' "'$c"); echo -n ${x//%0D/};;
+            *) x=$(printf '%s' "$c" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done); echo -n ${x//%0D/};;
         esac
     done
     LC_COLLATE=$old_lc_collate
