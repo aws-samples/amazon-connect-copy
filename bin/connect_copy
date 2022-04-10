@@ -114,11 +114,19 @@ done
 shift $((OPTIND-1))
 
 if [ "$(hex_code "é")" != "%C3%A9" ]; then
-    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly."
+    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly." >&2
     if [ -n "$ignore_improper_extended_ascii" ]; then
-        echo "Proceed regardless as the -e option is specified."
+        echo "Proceed regardless as the -e option is specified." >&2
     else
-        error "To proceed regardless, please run the command with the -e option - safe to do so if all component names use English characters exclusively."
+        cat <<EOD >&2
+
+If your instance component names contain Extended ASCII characters, such as accented letters
+like é, this Bash shell will encode those names differently from standard Bash shell encoding.
+
+If you are sure that your component names do not contain Extended ASCII characters,
+you may proceed regardless by running the command again with the -e option.
+EOD
+        exit 1
     fi
 fi
 
