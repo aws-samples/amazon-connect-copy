@@ -6,7 +6,7 @@
 #
 
 USAGE=$(cat <<EOD
-Usage: connect_save [-?fs] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
+Usage: connect_save [-?fse] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
     Retrieve resources from an Amazon Connect instance into plain files
 
     instance_alias       Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
@@ -15,6 +15,7 @@ Usage: connect_save [-?fs] [-G ignore_prefix] instance_alias [aws_profile] [cont
     -f                   Force removal of existing instance_alias directory
     -s                   Skip unpublished contact flow modules and contact flows with an error, instead of failing
     -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
+    -e                   Proceed even when the Bash shell may not encode Extended ASCII characters properly
     -?                   Help
 EOD
 )
@@ -55,6 +56,8 @@ EOD
     exit 1
 }
 
+hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+
 path_encode()  {
     old_lc_collate=$LC_COLLATE
     LC_COLLATE=C
@@ -63,34 +66,11 @@ path_encode()  {
         local c="${1:$i:1}"
         case $c in
             [a-zA-Z0-9.~_-]) printf '%s' "$c";;
-            *) x=$(printf '%s' "$c" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done); echo -n ${x//%0D/};;
+            *) x=$(hex_code "$c"); echo -n ${x//%0D/};;
         esac
     done
     LC_COLLATE=$old_lc_collate
 }
-
-# # A workaround for contact flow modules created before 1 Dec 2021.
-# fix_module_json() {
-#     # A workaround for AWS CLI failed to create contact flow modules
-#     # with Transitions Errors and Conditions in the EndFlowModuleExecution block.
-#     module_json=$1
-#     x=$(jq -r ".Actions[] | select(.Type == \"EndFlowModuleExecution\") | .Transitions" "$module_json")
-#     if [ "$x" == "{}" ]; then
-#         return
-#     fi
-#     ii=0
-#     cat "$module_json" > $TEMPFILE
-#     cat "$TEMPFILE" |
-#     jq -r ".Actions | map(.Type == \"EndFlowModuleExecution\") | .[]" |
-#     while read x; do
-#         if [ "$x" == "true" ]; then
-#             # Transitions Errors and Conditions found at Action[ii] - delete them
-#             cat "$module_json" > $TEMPFILE2
-#             jq "del(.Actions[$ii].Transitions.Errors, .Actions[$ii].Transitions.Conditions)" $TEMPFILE2 > "$module_json"
-#         fi
-#         ii=$[ii+1]
-#     done
-# }
 
 aws_connect() {
     local cmd=""
@@ -118,21 +98,32 @@ maxitems=999
 
 forced=
 skip_cf_errors=
+ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
-while getopts "?fsG:" arg; do
-  case "$arg" in
+while getopts "?fseG:" arg; do
+    case "$arg" in
     f)  forced=on;;
     s)  skip_cf_errors=on;;
+    e)  ignore_improper_extended_ascii=on;;
     G)  ignore_prefix=$OPTARG
         jq_prefix_filter=" | select(.Name | test(\"^($ignore_prefix)\") | not)"
         jq_prefix_filter_text=" excluding those with names prefixed with \"$ignore_prefix\""
         ;;
     *)  usage;;
-  esac
+    esac
 done
 shift $((OPTIND-1))
+
+if [ "$(hex_code "é")" != "%C3%A9" ]; then
+    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly."
+    if [ -n "$ignore_improper_extended_ascii" ]; then
+        echo "Proceed regardless as the -e option is specified."
+    else
+        error "To proceed regardless, please run the command with the -e option - safe to do so if all component names use English characters exclusively."
+    fi
+fi
 
 instance_alias_dir=$1
 instance_alias=$(basename "$instance_alias_dir")

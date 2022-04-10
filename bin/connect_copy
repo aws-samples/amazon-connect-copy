@@ -6,7 +6,7 @@
 #
 
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?d] helper
+Usage: $(basename $0) [-?de] helper
     Copy Amazon Connect instance A to instance B safely, based on the
     connect_list and connect_diff results, under the helper directory
     creating new components in helper.new, updating old components in helper.old,
@@ -14,6 +14,7 @@ Usage: $(basename $0) [-?d] helper
 
     helper        Name of the helper directory
     -d            Dry run - Run through the script but not updating the target instance
+    -e            Proceed even when the Bash shell may not encode Extended ASCII characters properly
     -?            Help
 EOD
 )
@@ -39,6 +40,8 @@ EOD
     exit 1
 }
 
+hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+
 path_encode()  {
     old_lc_collate=$LC_COLLATE
     LC_COLLATE=C
@@ -47,7 +50,7 @@ path_encode()  {
         local c="${1:$i:1}"
         case $c in
             [a-zA-Z0-9.~_-]) printf '%s' "$c";;
-            *) x=$(printf '%s' "$c" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done); echo -n ${x//%0D/};;
+            *) x=$(hex_code "$c"); echo -n ${x//%0D/};;
         esac
     done
     LC_COLLATE=$old_lc_collate
@@ -100,13 +103,24 @@ touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
 
 actionLead="# Action -"
 dryrun=
-while getopts "?d" arg; do
-  case "$arg" in
+ignore_improper_extended_ascii=
+while getopts "?de" arg; do
+    case "$arg" in
     d)  dryrun=on; echo "Dry Run";;
+    e)  ignore_improper_extended_ascii=on;;
     *)  usage;;
-  esac
+    esac
 done
 shift $((OPTIND-1))
+
+if [ "$(hex_code "é")" != "%C3%A9" ]; then
+    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly."
+    if [ -n "$ignore_improper_extended_ascii" ]; then
+        echo "Proceed regardless as the -e option is specified."
+    else
+        error "To proceed regardless, please run the command with the -e option - safe to do so if all component names use English characters exclusively."
+    fi
+fi
 
 helper=$1
 

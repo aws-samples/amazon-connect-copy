@@ -8,7 +8,7 @@
 #
 
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?f] instance_alias_a instance_alias_b helper [lambda_prefix_a] [lambda_prefix_b]
+Usage: $(basename $0) [-?fe] instance_alias_a instance_alias_b helper [lambda_prefix_a] [lambda_prefix_b]
     Based on connect_list result on Amazon Connect instance A and B,
     find the differences and produce helper files to safely copy resources from A to B.
 
@@ -19,6 +19,7 @@ Usage: $(basename $0) [-?f] instance_alias_a instance_alias_b helper [lambda_pre
     lambda_prefix_a   Lambda function name prefix in instance A to be replaced with <lambda_prefix_b>
     lambda_prefix b   Lambda function name prefix in instance B replacing <lambda_prefix_a>
     -f                Force removal of existing helper directory
+    -e                Proceed even when the Bash shell may not encode Extended ASCII characters properly
     -?                Help
 
     Note: This script create files in the helper directory without changing any instance resource files.
@@ -28,6 +29,8 @@ usage() { echo -e "$USAGE" >&2; exit 2; }
 
 error() { echo -e "Error: $1" >&2; exit 1; }
 
+hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+
 path_encode()  {
     old_lc_collate=$LC_COLLATE
     LC_COLLATE=C
@@ -36,7 +39,7 @@ path_encode()  {
         local c="${1:$i:1}"
         case $c in
             [a-zA-Z0-9.~_-]) printf '%s' "$c";;
-            *) x=$(printf '%s' "$c" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done); echo -n ${x//%0D/};;
+            *) x=$(hex_code "$c"); echo -n ${x//%0D/};;
         esac
     done
     LC_COLLATE=$old_lc_collate
@@ -55,13 +58,24 @@ add_file() {
 }
 
 forced=
-while getopts "?f" arg; do
-  case "$arg" in
+ignore_improper_extended_ascii=
+while getopts "?fe" arg; do
+    case "$arg" in
     f)  forced=on;;
+    e)  ignore_improper_extended_ascii=on;;
     *)  usage;;
-  esac
+    esac
 done
 shift $((OPTIND-1))
+
+if [ "$(hex_code "é")" != "%C3%A9" ]; then
+    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly."
+    if [ -n "$ignore_improper_extended_ascii" ]; then
+        echo "Proceed regardless as the -e option is specified."
+    else
+        error "To proceed regardless, please run the command with the -e option - safe to do so if all component names use English characters exclusively."
+    fi
+fi
 
 instance_alias_dir_a=$1
 instance_alias_a=$(basename "$instance_alias_dir_a")
