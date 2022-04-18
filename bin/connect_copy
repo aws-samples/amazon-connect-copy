@@ -8,13 +8,13 @@
 USAGE=$(cat <<EOD
 Usage: $(basename $0) [-?de] helper
     Copy Amazon Connect instance A to instance B safely, based on the
-    connect_list and connect_diff results, under the helper directory
+    connect_save and connect_diff results, under the helper directory
     creating new components in helper.new, updating old components in helper.old,
     and updating references defined in helper.sed.
 
     helper        Name of the helper directory
     -d            Dry run - Run through the script but not updating the target instance
-    -e            Proceed even when the Bash shell may not encode Extended ASCII characters properly
+    -e            Proceed even when the system may not encode Extended ASCII characters properly
     -?            Help
 EOD
 )
@@ -62,16 +62,39 @@ path_decode() {
 }
 
 diff_files() {
-    # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
+    # Compare TEMPA (sedded into TEMP1 and sorted into TEMP2) and TEMPB (sorted inline).
     # If same, return 0. If different, show the difference unsorted,
     # then ask if want to update. Return 1 if needs update and 0 otherwise.
-    sed -f "$helper_sed" $TEMPA | tee $TEMPA2 | sort > $TEMPA3
-    sort $TEMPB | diff -qbB - $TEMPA3 &> /dev/null
+    sed -f "$helper_sed" $TEMPA | tee $TEMP1 | sort > $TEMP2
+    sort $TEMPB | diff -qbB - $TEMP2 &> /dev/null
     if [ $? -eq 0 ]; then
         echo "same"
     else
-        # sdiff $TEMPB $TEMPA2
+        # sdiff $TEMPB $TEMP1
         echo "changed"
+    fi
+}
+
+sub_lex_bot() {
+    if [ -z "$lex_bot_prefix_a" -o -z "$lex_bot_prefix_b" ]; then
+        cat
+    else
+        cat > $TEMP1
+        lexExists=$(cat $TEMP1 | jq ".Actions[] | select(.Type == \"ConnectParticipantWithLexBot\") | has(\"Type\")")
+        if [ -z "$lexExists" ]; then
+            cat $TEMP1
+        else
+            cat $TEMP1 | jq "
+.Actions[] |
+if .Type == \"ConnectParticipantWithLexBot\"
+then .Parameters.LexBot.Name = (.Parameters.LexBot.Name |
+    sub(\"^$lex_bot_prefix_a\"; \"$lex_bot_prefix_b\"))
+else .
+end
+" > $TEMP2
+            cat $TEMP1 |
+            jq -r --slurpfile actions $TEMP2 ".Actions = \$actions"
+        fi
     fi
 }
 
@@ -96,10 +119,10 @@ TEMPNEW=${TEMPFILE}_new
 TEMPOLD=${TEMPFILE}_old
 TEMPA=${TEMPFILE}_A
 TEMPB=${TEMPFILE}_B
-TEMPA2=${TEMPFILE}_A2
-TEMPA3=${TEMPFILE}_A3
-trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3' EXIT
-touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
+TEMP1=${TEMPFILE}_1
+TEMP2=${TEMPFILE}_2
+trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMP1 $TEMP2' EXIT
+touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMP1 $TEMP2
 
 actionLead="# Action -"
 dryrun=
@@ -114,14 +137,14 @@ done
 shift $((OPTIND-1))
 
 if [ "$(hex_code "é")" != "%C3%A9" ]; then
-    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly." >&2
+    echo "WARNING: This system may not encode Extended ASCII characters properly." >&2
     if [ -n "$ignore_improper_extended_ascii" ]; then
         echo "Proceed regardless as the -e option is specified." >&2
     else
         cat <<EOD >&2
 
 If your instance component names contain Extended ASCII characters, such as accented letters
-like é, this Bash shell will encode those names differently from standard Bash shell encoding.
+like é, this system will encode those names differently from standard encoding.
 
 If you are sure that your component names do not contain Extended ASCII characters,
 you may proceed regardless by running the command again with the -e option.
@@ -699,16 +722,16 @@ EOD
             cat "$instance_alias_dir_b/routingQs_$routing_name.json" |
                 jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
                 sort -u > $TEMPB
-            > $TEMPA2
+            > $TEMP1
             diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" |
-            tee $TEMPA3 |
+            tee $TEMP2 |
             while read q_name; do
                 # cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                #     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/\\\"}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
+                #     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/\\\"}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
                 sed -e's/\\"/%22/g' "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/%22}}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
+                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/%22}}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
             done
-            cat $TEMPA2 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
+            cat $TEMP1 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
 
             cat <<EOD >> "$helper_log"
 
@@ -717,10 +740,10 @@ EOD
             if [ -n "$dryrun" ]; then
                 cat <<EOD
 Dry-associate queues to routing profile $routing_name_decoded
-$(cat $TEMPA3)
-$(cat $TEMPFILE)
+$(cat $TEMP2)
 
 EOD
+# $(cat $TEMPFILE)
                cat <<EOD >> "$helper_log"
 aws connect associate-routing-profile-queues \
 --instance-id $instance_id_b \
@@ -729,7 +752,7 @@ aws connect associate-routing-profile-queues \
 EOD
                 # rm "$helper/routingQueueConfig_$routing_name.json"
             else
-                cat $TEMPA3
+                cat $TEMP2
                 aws_connect associate-routing-profile-queues \
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
@@ -783,7 +806,9 @@ else
         # module_template_file=$helper/module_template.json
 
         cat "$instance_alias_dir_a/$module_json" |
-        sed -f "$helper_sed" > "$helper/$module_json"
+        sed -f "$helper_sed" |
+        sub_lex_bot \
+        > "$helper/$module_json"
 
         cat <<EOD >> "$helper_log"
 
@@ -876,7 +901,9 @@ else
         df=$(diff_files); echo $df; test "$df" == "same" && continue
 
         cat "$instance_alias_dir_a/$module_json" |
-        sed -f "$helper_sed" > "$helper/$module_json"
+        sed -f "$helper_sed" |
+        sub_lex_bot \
+        > "$helper/$module_json"
 
         cat <<EOD >> "$helper_log"
 
@@ -1069,7 +1096,9 @@ else
         df=$(diff_files); echo $df; test "$df" == "same" && continue
 
         cat "$instance_alias_dir_a/$flow_json" |
-        sed -f "$helper_sed" > "$helper/$flow_json"
+        sed -f "$helper_sed" |
+        sub_lex_bot \
+        > "$helper/$flow_json"
 
         cat <<EOD >> "$helper_log"
 
@@ -1132,14 +1161,14 @@ if [ -s $TEMPFILE ]; then
         --instance-id $instance_id_b \
         > $TEMPOLD || error $LINENO
     cat $TEMPOLD |
-    jq -r ".LambdaFunctions" > "$helper/lambds.json"
+    jq -r ".LambdaFunctions" > "$helper/lambdas.json"
 
     ii=0
     cat $TEMPFILE |
     while read lambdaArn; do
         ii=$[ii+1]
         echo -n "$ii. $lambdaArn ... "
-        lambdaExist=$(echo $(cat "$helper/lambds.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
+        lambdaExist=$(echo $(cat "$helper/lambdas.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
         if [ "$lambdaExist" -gt 0 ]; then
             echo "already associated"
             continue
@@ -1166,6 +1195,73 @@ EOD
             --function-arn $lambdaArn || error $LINENO
     done
 fi
+
+
+############################################################
+#
+# Contact flows and modules association with Lex bots
+#
+
+cat \
+    "$instance_alias_dir_b/flow_${contact_flow_prefix_encoded}"* \
+    "$instance_alias_dir_b/module_${contact_flow_prefix_encoded}"* 2> /dev/null |
+    jq -r ".Actions[] |
+select(.Type == \"ConnectParticipantWithLexBot\") |
+.Parameters.LexBot |
+\"Name=\" + .Name + \",LexRegion=\" + .Region" |
+    sort -u > $TEMPFILE
+
+if [ -s $TEMPFILE ]; then
+    echo
+    echo Associating Lex bots to $instance_alias_b
+    # Use "aws connect" instead of "aws_connect" to avoid logging
+    aws connect list-lex-bots \
+        $profile_flag \
+        --instance-id $instance_id_b \
+        > $TEMPOLD || error $LINENO
+    cat $TEMPOLD |
+    jq -r ".LexBots" > "$helper/lex-bots.json"
+
+    ii=0
+    cat $TEMPFILE |
+    while read lexBot; do
+        ii=$[ii+1]
+        echo -n "$ii. $lexBot ... "
+        lexBotName=${lexBot%%,*}
+        lexBotName=${lexBotName#Name=}
+        lexBotExist=$(echo $(cat "$helper/lex-bots.json" | jq ".[] | select(.Name == \"$lexBotName\")" | wc -l))
+        if [ "$lexBotExist" -gt 0 ]; then
+            echo "already associated"
+            continue
+        fi
+        echo "to be associated"
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-associating lex bot
+--instance-id $instance_id_b \
+--lex-bot $lexBot \
+
+
+EOD
+            cat <<EOD >> "$helper_log"
+
+aws connect associate-lex-bot \
+--instance-id $instance_id_b \
+--lex-bot $lexBot
+EOD
+            continue
+        fi
+        aws_connect associate-lex-bot \
+            --instance-id $instance_id_b \
+            --lex-bot $lexBot || error $LINENO
+    done
+fi
+
+
+############################################################
+#
+# Conclusion
+#
 
 num_actions=$(echo $(egrep "^$actionLead" "$helper_log" | wc -l))
 echo

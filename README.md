@@ -13,6 +13,7 @@ their corresponding components in the new instance, including:
 
 - Instance (pre-existing)
 - Lambda functions (pre-deployed)
+- Lex bots (pre-deployed)
 - Prompts (pre-uploaded)
 - Hours of operations
 - Queues
@@ -56,13 +57,13 @@ specific components with their individual Contact Centre Codes (CCCs).
 **Please replace names in the example with names specific to your use case.**
 
 ```
-connect_save source-connect-alias source-profile CCC
-connect_save target-connect-alias target-profile CCC
-connect_diff source-connect-alias target-connect-alias target-helper source- target-
+connect_save -p source-profile -c CCC source-connect-alias
+connect_save -p target-profile -c CCC target-connect-alias
+connect_diff source-connect-alias target-connect-alias helper
 # Dry run
-connect_copy -d target-helper
+connect_copy -d helper
 # Real run
-connect_copy target-helper
+connect_copy helper
 ```
 
 In this example:
@@ -72,14 +73,10 @@ In this example:
 - You may use the same profile for `source-profile` and `target-profile`,
   as long as that profile allows access to both the source and the target instances
   (typically when they are in the same AWS account).
-- Differences of the two instances (including profile specifications)
-  will be saved in directory `target-helper`.
-- All Lambda functions are assumed deployed with function names prefixed by
-  `source-` for the source instance and `target-` for the target instance.
-  (These two arguments can be omitted if the Lambda functions used in the source
-  and target instances bear the same name.)
 - Only contact flows and modules with names prefixed by the `CCC`
   Contact Centre Code will be copied to the target instance.
+- Differences of the two instances (including profile specifications)
+  will be saved in directory `helper`.
 
 ## Copying process
 
@@ -88,8 +85,9 @@ Note: All names in Amazon Connect are case sensitive.
 ### Pre-steps
 
 - Make sure no one else is making changes to either the source or the
-  target instances, or any Lambda functions they invoke.
+  target instances, or any Lambda functions or Lex bots they integrate with.
 - Deploy all Lambda functions required by the target instance.
+- Build all Lex bots required by the target instance.
 - Upload all required prompts to the target instance.
   - The prompt names need to be *exactly* the same as their counterparts
     in the source instance.
@@ -109,58 +107,63 @@ Note: All names in Amazon Connect are case sensitive.
 - `cd` to an empty working directory (e.g., `md <dir>; cd <dir>`).
 - Optionally, run `connect_save` with no arguments to show the help message:
   ```
-  Usage: connect_save [-?fs] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
-      Retrieve resources from an Amazon Connect instance into plain files
+  Usage: connect_save [-?fse] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+      Retrieve components from an Amazon Connect instance into plain files
 
-      instance_alias       Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
-      profile              AWS Profile to use
-      contact_flow_prefix  Prefix of Contact Flows and Modules of interest (all others will be ignored)
-      -f                   Force removal of existing instance_alias directory
-      -s                   Skip unpublished contact flow modules and contact flows with an error, instead of failing
-      -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
-      -?                   Help
+      instance_alias          Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
+      -f                      Force removal of existing instance_alias directory
+      -s                      Skip unpublished contact flow modules and contact flows with an error (instead of failing)
+      -e                      Proceed even when the system may not encode Extended ASCII characters properly
+      -p profile              AWS Profile to use
+      -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
+      -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
+      -?                      Help
   ```
   - `<instance_alias>` can be a directory path.
   - `<instance_alias>.log` will be produced by `connect_save`.
-- Run `connect_save <source_instance_alias> <source_profile> <contact_flow_prefix>` .
-- Run `connect_save <target_instance_alias> <target_profile> <contact_flow_prefix>` .
+- Run `connect_save -p <source_profile> -c <contact_flow_prefix> <source_instance_alias>` .
+- Run `connect_save -p <target_profile> -c <contact_flow_prefix> <target_instance_alias>` .
 - Optionally, run `connect_diff` with no arguments to show the help message:
   ```
-  Usage: connect_diff [-?f] instance_alias_a instance_alias_b helper [lambda_prefix_a] [lambda_prefix_b]
-      Based on connect_list result on Amazon Connect instance A and B,
-      find the differences and produce helper files to safely copy resources from A to B.
+  Usage: connect_diff [-?fe] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
+      Based on connect_save result on Amazon Connect instance A and B,
+      find the differences and produce helper files to safely copy components from A to B.
 
-      instance_alias_a  Alias of the Connect instance A
-      instance_alias_b  Alias of the Connect instance B
-                        (Aliases can be a path to the directory where the instance was saved using connect_save.)
-      helper            Name of the helper directory
-      lambda_prefix_a   Lambda function name prefix in instance A to be replaced with <lambda_prefix_b>
-      lambda_prefix b   Lambda function name prefix in instance B replacing <lambda_prefix_a>
-      -f                Force removal of existing helper directory
-      -?                Help
+      instance_alias_a    Alias of the Connect instance A
+      instance_alias_b    Alias of the Connect instance B
+                          (Aliases can be a path to the directory where the instance was saved using connect_save.)
+      helper              Name of the helper directory
+      -f                  Force removal of existing helper directory
+      -e                  Proceed even when the system may not encode Extended ASCII characters properly
+      -l lambda_prefix_a=lambda_prefix_b
+                          Lambda function name prefixes for instances A and B (if different) to be replaced during copying
+      -b lex_bot_prefix_a=lex_bot_prefix_b
+                          Lex bot name prefixes for instances A and B (if different) to be replaced during copying
+      -?                  Help
 
-      Note: This script create files in the helper directory without changing any instance resource files.
+      Note: This script create files in the helper directory without changing any instance component files.
   ```
-- Run `connect_diff <source_instance_alias> <target_instance_alias> <helper> <source_lambda_prefix> <target_lambda_prefix>` .
+- Run `connect_diff -l <source_lambda_prefix>=<target_lambda_prefix> -b <source_lex_bot_prefix>=<target_lex_bot_prefix> <source_instance_alias> <target_instance_alias> <helper>` .
 - Optionally, check under the helper directory `<helper>` to find the four helper files:
   - `helper.new` - components to create
-     (those found in the source but not in the target)
+     (those found in the source but not in the target); You may remove components that you do not want to be created from `helper.new`.
   - `helper.old` - components to update
-    (those found in the source and also in the target)
+    (those found in the source and also in the target); You may remove components that you do not want to be updated from `helper.old`.
   - `helper.sed` - SED script to fix references
     (so target components will not refer to any components in the source)
   - `helper.var` - variables of the two instances
     (instance A is the source, and instance B is the target)
 - Optionally, run `connect_copy` with no arguments to show the help message:
   ```
-  Usage: connect_copy [-?d] helper
+  Usage: connect_copy [-?de] helper
       Copy Amazon Connect instance A to instance B safely, based on the
-      connect_list and connect_diff results, under the helper directory
+      connect_save and connect_diff results, under the helper directory
       creating new components in helper.new, updating old components in helper.old,
       and updating references defined in helper.sed.
 
       helper        Name of the helper directory
       -d            Dry run - Run through the script but not updating the target instance
+      -e            Proceed even when the system may not encode Extended ASCII characters properly
       -?            Help
   ```
 - Optionally, verify the helper by dry-running `connect_copy -d <helper>` .
@@ -170,7 +173,7 @@ Note: All names in Amazon Connect are case sensitive.
     without `-d` (dry-run) to perform the actual copying.
 - Run `connect_copy <helper>` .
   - Verify if the target instance contains all source instance components
-    of the latest version, with all internal references and Lambda invocations
+    of the latest version, with all internal references, Lambda invocations and Lex bot input
     properly adjusted.
 
 ### Post-steps
@@ -192,12 +195,12 @@ You may restore an Amazon Connect instance from a previous backup copy saved by 
 Example:
 - Save a backup copy of the Amazon Connect instance.
   ```
-  connect_save <backup_dir>/<connect_instance_alias> <profile>
+  connect_save -p <profile> <backup_dir>/<connect_instance_alias>
   ```
 - Restore the same instance from the backup copy.
   - Save the current copy (the one to be restored).
     ```
-    connect_save <working_dir>/<connect_instance_alias> <profile>
+    connect_save -p <profile> <working_dir>/<connect_instance_alias>
     ```
   - Diff the current copy with the backup copy.
     ```

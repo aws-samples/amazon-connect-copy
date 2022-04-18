@@ -6,17 +6,17 @@
 #
 
 USAGE=$(cat <<EOD
-Usage: connect_save [-?fse] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
-    Retrieve resources from an Amazon Connect instance into plain files
+Usage: connect_save [-?fse] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+    Retrieve components from an Amazon Connect instance into plain files
 
-    instance_alias       Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
-    profile              AWS Profile to use
-    contact_flow_prefix  Prefix of Contact Flows and Modules of interest (all others will be ignored)
-    -f                   Force removal of existing instance_alias directory
-    -s                   Skip unpublished contact flow modules and contact flows with an error, instead of failing
-    -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
-    -e                   Proceed even when the Bash shell may not encode Extended ASCII characters properly
-    -?                   Help
+    instance_alias          Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
+    -f                      Force removal of existing instance_alias directory
+    -s                      Skip unpublished contact flow modules and contact flows with an error (instead of failing)
+    -e                      Proceed even when the system may not encode Extended ASCII characters properly
+    -p profile              AWS Profile to use
+    -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
+    -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
+    -?                      Help
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
@@ -102,11 +102,13 @@ ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
-while getopts "?fseG:" arg; do
+while getopts "?fsep:c:G:" arg; do
     case "$arg" in
     f)  forced=on;;
     s)  skip_cf_errors=on;;
     e)  ignore_improper_extended_ascii=on;;
+    p)  profile=$OPTARG;;
+    c)  contact_flow_prefix=$OPTARG;;
     G)  ignore_prefix=$OPTARG
         jq_prefix_filter=" | select(.Name | test(\"^($ignore_prefix)\") | not)"
         jq_prefix_filter_text=" excluding those with names prefixed with \"$ignore_prefix\""
@@ -117,14 +119,14 @@ done
 shift $((OPTIND-1))
 
 if [ "$(hex_code "é")" != "%C3%A9" ]; then
-    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly." >&2
+    echo "WARNING: This system may not encode Extended ASCII characters properly." >&2
     if [ -n "$ignore_improper_extended_ascii" ]; then
         echo "Proceed regardless as the -e option is specified." >&2
     else
         cat <<EOD >&2
 
 If your instance component names contain Extended ASCII characters, such as accented letters
-like é, this Bash shell will encode those names differently from standard Bash shell encoding.
+like é, this system will encode those names differently from standard encoding.
 
 If you are sure that your component names do not contain Extended ASCII characters,
 you may proceed regardless by running the command again with the -e option.
@@ -135,10 +137,13 @@ fi
 
 instance_alias_dir=$1
 instance_alias=$(basename "$instance_alias_dir")
-profile=$2
+
+# Backward compatibility - if it is set, ignore the argument
+profile=${profile:-$2}
 profile_flag=${profile:+ --profile $profile}
 
-contact_flow_prefix=$3
+# Backward compatibility - if it is set, ignore the argument
+contact_flow_prefix=${contact_flow_prefix:-$3}
 contact_flow_prefix_filter=${contact_flow_prefix:+" | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))"}
 contact_flow_prefix_text="${contact_flow_prefix:+ with names prefixed with \"$contact_flow_prefix\" or Default}"
 
