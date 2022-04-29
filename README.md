@@ -45,7 +45,7 @@ not found in the source instance. If there are multiple contact centres sharing
 the same Amazon Connect instance, it is a good practice to prefix contact centre
 specific components with their individual Contact Centre Codes (CCCs).
 
-A note to developers: We will accept PRs on the "development" branch only. Thank you.
+A note to developers: To contribute, please read [CONTRIBUTING.md](./CONTRIBUTING.md) first. We will accept PRs on the *development* branch only. Thank you.
 
 ## Installation
 
