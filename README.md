@@ -13,7 +13,7 @@ their corresponding components in the new instance, including:
 
 - Instance (pre-existing)
 - Lambda functions (pre-deployed)
-- Lex bots (pre-deployed)
+- Lex bots (Classic) (pre-deployed)
 - Prompts (pre-uploaded)
 - Hours of operations
 - Queues
@@ -44,6 +44,8 @@ Amazon-Connect-Copy does not remove any target instance components which are
 not found in the source instance. If there are multiple contact centres sharing
 the same Amazon Connect instance, it is a good practice to prefix contact centre
 specific components with their individual Contact Centre Codes (CCCs).
+
+A note to developers: We will accept PRs on the "development" branch only. Thank you.
 
 ## Installation
 
@@ -85,9 +87,9 @@ Note: All names in Amazon Connect are case sensitive.
 ### Pre-steps
 
 - Make sure no one else is making changes to either the source or the
-  target instances, or any Lambda functions or Lex bots they integrate with.
+  target instances, or any Lambda functions or Lex bots (Classic) they integrate with.
 - Deploy all Lambda functions required by the target instance.
-- Build all Lex bots required by the target instance.
+- Build all Lex bots (Classic) required by the target instance.
 - Upload all required prompts to the target instance.
   - The prompt names need to be *exactly* the same as their counterparts
     in the source instance.
@@ -107,13 +109,14 @@ Note: All names in Amazon Connect are case sensitive.
 - `cd` to an empty working directory (e.g., `md <dir>; cd <dir>`).
 - Optionally, run `connect_save` with no arguments to show the help message:
   ```
-  Usage: connect_save [-?fse] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+  Usage: connect_save [-?fsev] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
       Retrieve components from an Amazon Connect instance into plain files
 
       instance_alias          Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
       -f                      Force removal of existing instance_alias directory
       -s                      Skip unpublished contact flow modules and contact flows with an error (instead of failing)
       -e                      Proceed even when the system may not encode Extended ASCII characters properly
+      -v                      Show version of this script
       -p profile              AWS Profile to use
       -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
       -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
@@ -125,7 +128,7 @@ Note: All names in Amazon Connect are case sensitive.
 - Run `connect_save -p <target_profile> -c <contact_flow_prefix> <target_instance_alias>` .
 - Optionally, run `connect_diff` with no arguments to show the help message:
   ```
-  Usage: connect_diff [-?fe] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
+  Usage: connect_diff [-?fev] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
       Based on connect_save result on Amazon Connect instance A and B,
       find the differences and produce helper files to safely copy components from A to B.
 
@@ -135,10 +138,11 @@ Note: All names in Amazon Connect are case sensitive.
       helper              Name of the helper directory
       -f                  Force removal of existing helper directory
       -e                  Proceed even when the system may not encode Extended ASCII characters properly
+      -v                  Show version of this script
       -l lambda_prefix_a=lambda_prefix_b
                           Lambda function name prefixes for instances A and B (if different) to be replaced during copying
       -b lex_bot_prefix_a=lex_bot_prefix_b
-                          Lex bot name prefixes for instances A and B (if different) to be replaced during copying
+                          Lex bot (Classic) name prefixes for instances A and B (if different) to be replaced during copying
       -?                  Help
 
       Note: This script create files in the helper directory without changing any instance component files.
@@ -155,16 +159,17 @@ Note: All names in Amazon Connect are case sensitive.
     (instance A is the source, and instance B is the target)
 - Optionally, run `connect_copy` with no arguments to show the help message:
   ```
-  Usage: connect_copy [-?de] helper
+  Usage: connect_copy [-?dev] helper
       Copy Amazon Connect instance A to instance B safely, based on the
       connect_save and connect_diff results, under the helper directory
       creating new components in helper.new, updating old components in helper.old,
       and updating references defined in helper.sed.
 
-      helper        Name of the helper directory
-      -d            Dry run - Run through the script but not updating the target instance
-      -e            Proceed even when the system may not encode Extended ASCII characters properly
-      -?            Help
+      helper  Name of the helper directory
+      -d      Dry run - Run through the script but not updating the target instance
+      -e      Proceed even when the system may not encode Extended ASCII characters properly
+      -v      Show version of this script
+      -?      Help
   ```
 - Optionally, verify the helper by dry-running `connect_copy -d <helper>` .
   - Check if the proposed changes are as what you would expect from the output.
@@ -173,7 +178,7 @@ Note: All names in Amazon Connect are case sensitive.
     without `-d` (dry-run) to perform the actual copying.
 - Run `connect_copy <helper>` .
   - Verify if the target instance contains all source instance components
-    of the latest version, with all internal references, Lambda invocations and Lex bot input
+    of the latest version, with all internal references, Lambda invocations and Lex bot (Classic) input
     properly adjusted.
 
 ### Post-steps

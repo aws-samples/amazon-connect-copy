@@ -7,8 +7,11 @@
 #   connect_save on instance A and B.
 #
 
+VERSION=1.1
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?fe] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
+Usage: $(basename $0) [-?fev] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
     Based on connect_save result on Amazon Connect instance A and B,
     find the differences and produce helper files to safely copy components from A to B.
 
@@ -18,16 +21,18 @@ Usage: $(basename $0) [-?fe] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_pr
     helper              Name of the helper directory
     -f                  Force removal of existing helper directory
     -e                  Proceed even when the system may not encode Extended ASCII characters properly
+    -v                  Show version of this script
     -l lambda_prefix_a=lambda_prefix_b
                         Lambda function name prefixes for instances A and B (if different) to be replaced during copying
     -b lex_bot_prefix_a=lex_bot_prefix_b
-                        Lex bot name prefixes for instances A and B (if different) to be replaced during copying
+                        Lex bot (Classic) name prefixes for instances A and B (if different) to be replaced during copying
     -?                  Help
 
     Note: This script create files in the helper directory without changing any instance component files.
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
 
 error() { echo -e "Error: $1" >&2; exit 1; }
 
@@ -65,10 +70,11 @@ lambda_prefix_a=
 lambda_prefix_b=
 lex_bot_prefix_a=
 lex_bot_prefix_b=
-while getopts "?fel:b:" arg; do
+while getopts "?fevl:b:" arg; do
     case "$arg" in
     f)  forced=on;;
     e)  ignore_improper_extended_ascii=on;;
+    v)  version;;
     l)  lambda_prefix_a=${OPTARG%%=*}
         lambda_prefix_b=${OPTARG#*=}
         ;;

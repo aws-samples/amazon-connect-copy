@@ -5,20 +5,25 @@
 # Copy Amazon Connect instance A to instance B safely
 #
 
+VERSION=1.1
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?de] helper
+Usage: $(basename $0) [-?dev] helper
     Copy Amazon Connect instance A to instance B safely, based on the
     connect_save and connect_diff results, under the helper directory
     creating new components in helper.new, updating old components in helper.old,
     and updating references defined in helper.sed.
 
-    helper        Name of the helper directory
-    -d            Dry run - Run through the script but not updating the target instance
-    -e            Proceed even when the system may not encode Extended ASCII characters properly
-    -?            Help
+    helper  Name of the helper directory
+    -d      Dry run - Run through the script but not updating the target instance
+    -e      Proceed even when the system may not encode Extended ASCII characters properly
+    -v      Show version of this script
+    -?      Help
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
 
 error() {
     if [[ ! "$1" =~ ^[[:digit:]]+$ ]]; then
@@ -76,7 +81,7 @@ diff_files() {
 }
 
 sub_lex_bot() {
-    if [ -z "$lex_bot_prefix_a" -o -z "$lex_bot_prefix_b" ]; then
+    if [ -z "$lex_bot_prefix_a" -a -z "$lex_bot_prefix_b" ]; then
         cat
     else
         cat > $TEMP1
@@ -127,10 +132,11 @@ touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMP1 $TEMP2
 actionLead="# Action -"
 dryrun=
 ignore_improper_extended_ascii=
-while getopts "?de" arg; do
+while getopts "?dev" arg; do
     case "$arg" in
     d)  dryrun=on; echo "Dry Run";;
     e)  ignore_improper_extended_ascii=on;;
+    v)  version;;
     *)  usage;;
     esac
 done
@@ -723,41 +729,45 @@ EOD
                 jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
                 sort -u > $TEMPB
             > $TEMP1
-            diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" |
-            tee $TEMP2 |
-            while read q_name; do
-                # cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                #     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/\\\"}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
-                sed -e's/\\"/%22/g' "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/%22}}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
-            done
-            cat $TEMP1 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
+            diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" > $TEMP2
+            if [ -s $TEMP2 ]; then
+                cat $TEMP2 |
+                while read q_name; do
+                    # cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                    #     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/\\\"}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
+                    sed -e's/\\"/%22/g' "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                        jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/%22}}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
+                done
+                cat $TEMP1 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
 
-            cat <<EOD >> "$helper_log"
+                cat <<EOD >> "$helper_log"
 
 $actionLead Associate queues to routing profile: $routing_name_decoded
 EOD
-            if [ -n "$dryrun" ]; then
-                cat <<EOD
+                if [ -n "$dryrun" ]; then
+                    cat <<EOD
 Dry-associate queues to routing profile $routing_name_decoded
 $(cat $TEMP2)
 
 EOD
 # $(cat $TEMPFILE)
-               cat <<EOD >> "$helper_log"
+                   cat <<EOD >> "$helper_log"
 aws connect associate-routing-profile-queues \
 --instance-id $instance_id_b \
 --routing-profile-id $routing_id_b \
 --queue-configs "file://$helper/routingQueueConfig_$routing_name.json"
 EOD
-                # rm "$helper/routingQueueConfig_$routing_name.json"
-            else
-                cat $TEMP2
-                aws_connect associate-routing-profile-queues \
-                    --instance-id $instance_id_b \
-                    --routing-profile-id $routing_id_b \
-                    --queue-configs "file://$helper/routingQueueConfig_$routing_name.json" || error $LINENO
+                    # rm "$helper/routingQueueConfig_$routing_name.json"
+                else
+                    cat $TEMP2
+                    aws_connect associate-routing-profile-queues \
+                        --instance-id $instance_id_b \
+                        --routing-profile-id $routing_id_b \
+                        --queue-configs "file://$helper/routingQueueConfig_$routing_name.json" || error $LINENO
+                fi
+            fi
 
+            if [ -z "$dryrun" ]; then
                 aws_connect list-routing-profile-queues \
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
@@ -1174,6 +1184,11 @@ if [ -s $TEMPFILE ]; then
             continue
         fi
         echo "to be associated"
+
+        cat <<EOD >> "$helper_log"
+
+$actionLead Associate Lambda function: $lambdaArn
+EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-associating lambda function
@@ -1201,19 +1216,25 @@ fi
 #
 # Contact flows and modules association with Lex bots
 #
+instance_alias_dir_to_discover=$instance_alias_dir_b
+if [ -n "$dryrun" ]; then
+    instance_alias_dir_to_discover=$instance_alias_dir_a
+fi
 
 cat \
-    "$instance_alias_dir_b/flow_${contact_flow_prefix_encoded}"* \
-    "$instance_alias_dir_b/module_${contact_flow_prefix_encoded}"* 2> /dev/null |
+    "$instance_alias_dir_to_discover/flow_${contact_flow_prefix_encoded}"* \
+    "$instance_alias_dir_to_discover/module_${contact_flow_prefix_encoded}"* 2> /dev/null |
     jq -r ".Actions[] |
 select(.Type == \"ConnectParticipantWithLexBot\") |
 .Parameters.LexBot |
+select(. != null) |
 \"Name=\" + .Name + \",LexRegion=\" + .Region" |
     sort -u > $TEMPFILE
 
 if [ -s $TEMPFILE ]; then
     echo
-    echo Associating Lex bots to $instance_alias_b
+    echo "Associating Lex bots (Classic) to $instance_alias_b"
+    cat $TEMPFILE
     # Use "aws connect" instead of "aws_connect" to avoid logging
     aws connect list-lex-bots \
         $profile_flag \
@@ -1235,7 +1256,15 @@ if [ -s $TEMPFILE ]; then
             continue
         fi
         echo "to be associated"
+
+        cat <<EOD >> "$helper_log"
+
+$actionLead Associate Lex Bot (Classic): $lexBot
+EOD
         if [ -n "$dryrun" ]; then
+            if [ -n "$lex_bot_prefix_a" -o -n "$lex_bot_prefix_b" ]; then
+                lexBot=$(echo "$lexBot" | sed -e"s/^Name=$lex_bot_prefix_a/Name=$lex_bot_prefix_b/")
+            fi
             cat <<EOD
 Dry-associating lex bot
 --instance-id $instance_id_b \

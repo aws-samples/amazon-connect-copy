@@ -5,14 +5,18 @@
 # Get a list of components of an Amazon Connect instance
 #
 
+VERSION=1.1
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
 USAGE=$(cat <<EOD
-Usage: connect_save [-?fse] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+Usage: connect_save [-?fsev] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
     Retrieve components from an Amazon Connect instance into plain files
 
     instance_alias          Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
     -f                      Force removal of existing instance_alias directory
     -s                      Skip unpublished contact flow modules and contact flows with an error (instead of failing)
     -e                      Proceed even when the system may not encode Extended ASCII characters properly
+    -v                      Show version of this script
     -p profile              AWS Profile to use
     -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
     -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
@@ -20,6 +24,7 @@ Usage: connect_save [-?fse] [-p aws_profile] [-c contact_flow_prefix] [-G ignore
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
 
 error() {
     if [ "$#" -ne 0 ]; then
@@ -102,11 +107,12 @@ ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
-while getopts "?fsep:c:G:" arg; do
+while getopts "?fsevp:c:G:" arg; do
     case "$arg" in
     f)  forced=on;;
     s)  skip_cf_errors=on;;
     e)  ignore_improper_extended_ascii=on;;
+    v)  version;;
     p)  profile=$OPTARG;;
     c)  contact_flow_prefix=$OPTARG;;
     G)  ignore_prefix=$OPTARG
