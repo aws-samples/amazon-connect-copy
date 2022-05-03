@@ -1,0 +1,11 @@
+## Always start comment with ## followed by space in this file
+## The flows with following JSON content cannot be migrated
+## This can be in outbound whisper flow or Transfer to queue flow where a claimed number is set as caller Id.
+## This caller Id number will not exist in destination account but flow skeleton will be created to avoid errors in other flows
+"setOptionalCallerId":true,"callerIdSource":"claimed","claimedPhoneNumber"
+,"CallerId":{"Number":"+
+## Skip the flow if it contains set queue block with Agent queue ARN. We are not migrating Agents yet with this package and so Agent queue ARN will not exist in destination instance
+/queue/agent/
+## Skip quick connect association to queue if it contains quick connect type of USER
+"QuickConnectType": "USER"
+#####
