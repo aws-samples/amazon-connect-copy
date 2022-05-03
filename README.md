@@ -17,7 +17,7 @@ their corresponding components in the new instance, including:
 
 - Instance (pre-existing)
 - Lambda functions (pre-deployed)
-- Lex bots (Classic) (pre-deployed)
+- Lex bots (Classic and v2) (pre-deployed)
 - Prompts (pre-uploaded)
 - Hours of operations
 - Queues
