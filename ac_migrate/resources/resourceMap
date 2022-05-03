@@ -1,0 +1,5 @@
+###### resource-type source-name dest-name
+###### e.g. lambda srcfuncname destfuncname
+###### e.g. bot srcbotname destbotname (### This is example of Classic bot)
+###### e.g. bot srcbot:aliasname destbot:aliasname (### This is example of V2 bot)
+

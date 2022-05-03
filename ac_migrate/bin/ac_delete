@@ -1,0 +1,367 @@
+#!/bin/bash
+
+############################################################
+#
+# Delete newly created resources from Amazon Connect instance B
+#### This script deletes all the newly created resources (created by running "copy" script) from Amazon Connect instance B
+#### The script will delete newly created quick connects; contact flows; contact flow modules and hours of operations
+#### However, newly created queues and routing profiles cannot be deleted
+####
+#### "ac_copy" script creates the new resources in instance B and keeps list in helper.del file
+####
+#### NOTE: If you plan to delete the newly created resources using this script then
+#### make sure not to remove "helper" directory
+#
+############################################################
+
+USAGE=$(cat <<EOD
+Usage: $(basename $0) [-?d] helper
+    Delete newly created resources from Amazon Connect instance B based on the
+    helper.del file created in helper directory
+    The new resources should be created by running "copy" script first
+
+    helper        Name of the helper directory
+    -d            Dry run - Run through the script but not deleting the target instance
+    -?            Help
+EOD
+)
+usage() { echo -e "$USAGE" >&2; exit 2; }
+
+error() {
+    if [[ ! "$1" =~ ^[[:digit:]]+$ ]]; then
+        # Not an AWS CLI error
+        cat <<EOD >&2
+Error: $*
+EOD
+    else
+        # An AWS CLI error
+        line_no=$1
+        shift
+        cat <<EOD >&2
+$*
+Error at line ${line_no}. Recommended actions:
+Make sure "helper.del exists in helper. If it does check its contents
+Install the latest AWS CLI: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html .
+EOD
+    fi
+    exit 1
+}
+
+aws_connect() {
+    local cmd=""
+    local ii
+    for ii; do
+        [[ "$ii" == *" "* ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
+    done
+    echo "aws connect$profile_flag$cmd" >> "$aws_cli_log"
+    eval aws connect$profile_flag$cmd 2> $TEMPERR
+    local ret=$?
+    if [ -s $TEMPERR ]; then
+        cat $TEMPERR | tee -a "$aws_cli_log" >&2
+    fi
+    return $ret
+}
+
+TEMPFILE=$(mktemp)
+TEMPERR=${TEMPFILE}_err
+TEMPNEW=${TEMPFILE}_new
+TEMPOLD=${TEMPFILE}_old
+TEMPA=${TEMPFILE}_A
+TEMPB=${TEMPFILE}_B
+TEMPA2=${TEMPFILE}_A2
+TEMPA3=${TEMPFILE}_A3
+trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3' EXIT
+touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3
+
+actionLead="# Action -"
+dryrun=
+while getopts "?d" arg; do
+  case "$arg" in
+    d)  dryrun=on; echo "Dry Run";;
+    *)  usage;;
+  esac
+done
+shift $((OPTIND-1))
+
+helper=$1
+
+if [ -z "$helper" ]; then
+    usage
+fi
+
+helper_var=$helper/helper.var
+helper_del=$helper/helper.del
+helper_log="helper.log"
+aws_cli_log="$helper_log"
+
+. "$helper_var"
+profile=$aws_profile_b
+profile_flag=${profile:+ --profile $profile}
+
+## Check if helper.del file exists
+if [ ! -s $helper_del ]; then
+    echo "File "$helper_del" does not exist. Perhaps no new resources are created - exiting"
+    exit 0
+fi
+
+## Get the instance Id for destination instance
+egrep "^instance_" "$helper_del" > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "Destination Amazon Connect Instance Id does not exist - exiting"
+    exit 0
+else
+   instance_name=`egrep "^instance_" "$TEMPNEW" | cut -d'|' -f1`
+   instance_id=`egrep "^instance_" "$TEMPNEW" | cut -d'|' -f2`
+   instance_name=${instance_name#instance_}
+fi
+
+if [ -n "$dryrun" ]; then
+    cat <<EOD >> "$helper_log"
+# Dry-run mode - Actions listed below are not being carried out
+#
+EOD
+else
+read -p "Are you sure you want to delete newly created resources from destination instance ("$instance_name") (yes/no): " ans
+if [ "$ans" != "yes" ]; then
+        echo "Exiting without removing newly created resources..."
+        exit 0
+fi
+fi
+
+############################################################
+#
+# Quick Connects
+#
+
+cat <<EOD
+
+Quick Connects
+----------------
+EOD
+# Delete what is in $helper_del
+egrep "^qc_" "$helper_del" > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No Quick Connects to delete"
+else
+    num_hours=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nDeleting $num_hours Quick Connects"
+    ii=0
+    sort $TEMPNEW |
+    while read line1; do
+        ii=$[ii+1]
+        qc_json=`echo $line1 | cut -d'|' -f1`
+        qc_id=`echo $line1 | cut -d'|' -f2`
+        qc_name=${qc_json#qc_}
+        echo "$ii. $qc_name"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Delete Quick Connects: $qc_name
+EOD
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-delete Quick Connect
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect delete-quick-connect \
+--instance-id $instance_id --quick-connect-id $qc_id \
+> "$helper/delete_$qc_json"
+EOD
+            continue
+        fi
+
+        aws_connect delete-quick-connect \
+            --instance-id $instance_id --quick-connect-id $qc_id \
+            > "$helper/deleted_$qc_json" || error $LINENO
+	
+	# Removing from helper.del now that resource is deleted
+        sed -e"/$qc_json/d" "$helper_del" > $TEMPFILE
+        cat $TEMPFILE > "$helper_del"
+
+    done
+fi
+############################################################
+
+############################################################
+#
+# Contact Flows
+#
+
+cat <<EOD
+
+Contact Flows
+----------------
+EOD
+# Delete what is in $helper_del
+egrep "^flow_" "$helper_del" > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No Contact flows to delete"
+else
+    num_hours=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nDeleting $num_hours Contact flows"
+    ii=0
+    sort $TEMPNEW |
+    while read line1; do
+        ii=$[ii+1]
+        flow_json=`echo $line1 | cut -d'|' -f1`
+        flow_id=`echo $line1 | cut -d'|' -f2`
+        flow_name=${flow_json#flow_}
+        echo "$ii. $flow_name"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Delete Contact flow: $flow_name
+EOD
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-delete Contact flow
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect delete-contact-flow \
+--instance-id $instance_id --contact-flow-id $flow_id \
+> "$helper/delete_$flow_json"
+EOD
+            continue
+        fi
+
+        aws_connect delete-contact-flow \
+            --instance-id $instance_id --contact-flow-id $flow_id \
+            > "$helper/deleted_$flow_json" || error $LINENO
+	
+	# Removing from helper.del now that resource is deleted
+        sed -e"/$flow_json/d" "$helper_del" > $TEMPFILE
+        cat $TEMPFILE > "$helper_del"
+
+    done
+fi
+############################################################
+
+
+############################################################
+#
+# Contact Flows Modules
+#
+
+cat <<EOD
+
+Contact Flow Modules
+--------------------
+EOD
+# Delete what is in $helper_del
+egrep "^module_" "$helper_del" > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No Contact flow modules to delete"
+else
+    num_hours=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nDeleting $num_hours Contact flow modules"
+    ii=0
+    sort $TEMPNEW |
+    while read line1; do
+        ii=$[ii+1]
+        module_json=`echo $line1 | cut -d'|' -f1`
+        module_id=`echo $line1 | cut -d'|' -f2`
+        module_name=${module_json#module_}
+        echo "$ii. $module_name"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Delete Contact flow module: $module_name
+EOD
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-delete Contact flow module
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect delete-contact-flow-module \
+--instance-id $instance_id --contact-flow-module-id $module_id \
+> "$helper/delete_$module_json"
+EOD
+            continue
+        fi
+
+        aws_connect delete-contact-flow-module \
+            --instance-id $instance_id --contact-flow-module-id $module_id \
+            > "$helper/deleted_$module_json" || error $LINENO
+	
+	# Removing from helper.del now that resource is deleted
+        sed -e"/$module_json/d" "$helper_del" > $TEMPFILE
+        cat $TEMPFILE > "$helper_del"
+
+    done
+fi
+############################################################
+
+########## EXITING AS Business Hours cannot be deleted if referred in the queue
+exit 0
+############################################################
+
+
+############################################################
+#
+# Hours of operations
+#
+
+cat <<EOD
+
+Hours of operations
+-------------------
+EOD
+# Delete what is in $helper_del
+egrep "^hour_" "$helper_del" > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+    echo "No hours of operations to delete"
+else
+    num_hours=$(echo $(cat $TEMPNEW | wc -l))
+    echo -e "\nDeleting $num_hours Hours of operations"
+    ii=0
+    sort $TEMPNEW |
+    while read line1; do
+        ii=$[ii+1]
+        hour_json=`echo $line1 | cut -d'|' -f1`
+        hour_id=`echo $line1 | cut -d'|' -f2`
+        hour_name=${hour_json#hour_}
+        echo "$ii. $hour_name"
+        cat <<EOD >> "$helper_log"
+
+$actionLead Delete hours of operation: $hour_name
+EOD
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-delete hours of operation
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect delete-hours-of-operation \
+--instance-id $instance_id --hours-of-operation-id $hour_id \
+> "$helper/delete_$hour_json"
+EOD
+            # rm "$helper/$hour_json"
+            continue
+        fi
+
+        aws_connect delete-hours-of-operation \
+            --instance-id $instance_id --hours-of-operation-id $hour_id \
+            > "$helper/deleted_$hour_json" || error $LINENO
+	
+	# Removing from helper.del now that resource is deleted
+        sed -e"/$hour_json/d" "$helper_del" > $TEMPFILE
+        cat $TEMPFILE > "$helper_del"
+
+    done
+fi
+############################################################
+
+
+############################################################
+num_actions=$(echo $(egrep "^$actionLead" "$helper_log" | wc -l))
+echo
+echo "$num_actions delete actions on the target instance"
+if [ "$num_actions" -eq 0 ]; then
+    echo "No resource deletion required."
+    exit 3
+else
+    echo
+    cat "$helper_log"
+    echo
+    if [ -n "$dryrun" ]; then
+        echo "No actions were carried out in Dry-run mode"
+    else
+        echo "All done"
+    fi
+fi
