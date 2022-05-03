@@ -54,8 +54,6 @@ A note to developers: We will accept PRs on the "development" branch only. Thank
 - Install [AWS CLI](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
   - Recommend installing the latest version of AWS CLI.
 - Install [jq](https://stedolan.github.io/jq/) (if not already installed on your platform).
-- Copy `bin/*` to your Shell search path (e.g., `cp bin/* /usr/local/bin/`).
-
-## Example
+- Copy `bin/ac_migrate.zip to your your environment and unzip it
 
 Refer to INSTRUCTIONS for additional details
