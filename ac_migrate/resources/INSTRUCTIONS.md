@@ -12,9 +12,9 @@ ac_migrate
 3. Ensure that PATH contains ../ac_migrate/bin and export PATH
 4. Execute bash scripts from ../ac_migrate folder
 
-===========================================
+========================================
 Amazon Connect Custom Migration Scripts
-===========================================
+========================================
 Following are the bash scripts that are used for the migration of the Amazon Connect resources:
 1. Folder: ac_migrate/bin
 	a.	ac_set_env: This script is used to set up the environment. It will remove the older AWS CLI version, install the new AWS CLI version as well as set the environment path in Cloud9 environment. (Please use latest version of AWS CLI in your preferred environment to run bash scripts).
@@ -41,7 +41,7 @@ Following are the bash scripts that are used for the migration of the Amazon Con
 	b.	flowExceptions: **** DO NOT UPDATE THIS FILE ****. This file contains collection of the search strings that are used to find the flow exceptions. If a search string is found in a flow JSON then that flow is not updated. The examples of such flows are an “Outbound whisper flow” where an instance’s claimed number is used to set as caller Id, or “Transfer to queue flow” where an instance’s claimed number is used to set as caller Id. Other examples are where a hard-coded Agent ARN is configured in a flow. A manual update is required for such flows.
 
 ==============
-Prerequisites
+Prerequisites:
 ==============
 1.	An environment to execute bash scripts (e.g. AWS Cloud9)
 2.	AWS IAM credentials for the source and destination account. The policies are listed in the section below.
@@ -59,12 +59,19 @@ Prerequisites
 Create a resource mapping file as follows:
 ==========================================
 a. Copy the package on your local machine
+
 b. Navigate to folder “../ac_migrate/resources”
+
 c. Open file “resourceMap” and add the resource-type, name-in-source-account and name-in-destination-account. Please note that full ARN should not be added, only the name of the Lambda function or the Lex bot name. If the bot is of type V2 then add the name along with the bot alias with colon (:) in between. 
+
 	e.g. 
+	
 	lambda    source-function-name-a     dest-function-name-a 
+
 	lambda    source-function-name-b     dest-function-name-b 
+	
 	bot    	source-bot-name-a   			dest-bot-name-a
+	
 	bot		source-bot-name:bot-alias-name	dest-bot-name:bot-alias-name
 
 ===============
@@ -75,4 +82,4 @@ ac_save -s  dest-instance-alias-name    dest-profile-name  (DO NOT use option "-
 ac_diff  source-instance-alias-name    dest-instance-alias-name    helper_dir
 ac_copy [-d] helper_dir
 
-==================================================================
+=============================================================
