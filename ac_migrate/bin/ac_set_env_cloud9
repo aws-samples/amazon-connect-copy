@@ -1,0 +1,31 @@
+#!/bin/bash
+
+## #################################################################
+## Collection of commands to prepare the Cloud9 environment
+## to migrate from one Connect environment to another
+## #################################################################
+##
+## Set directories
+homedir=`pwd`
+##
+## Uninstall CLI v1
+echo "Uninstalling older version of AWS CLI..."
+sudo yum -y remove awscli
+##
+## Install latest CLI v2
+echo "Installing new version of AWS CLI..."
+cd ${homedir}
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+rm awscliv2.zip
+rm -r aws
+##
+cd ${homedir}
+chmod 700 ac*
+chmod 700 jq
+echo "export PATH=$PATH:/usr/local/bin:${homedir}" > ${homedir}/.ac
+. .ac
+echo "DONE"
+##
+## DONE

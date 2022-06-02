@@ -8,4 +8,6 @@
 /queue/agent/
 ## Skip quick connect association to queue if it contains quick connect type of USER
 "QuickConnectType": "USER"
+## skip flow with HVOC block
+"Type":"CheckOutboundCallStatus"
 #####

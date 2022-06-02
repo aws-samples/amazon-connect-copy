@@ -81,5 +81,17 @@ Merged changes made by Jacky Ko
 4/29/2022
 Fixed path related issues
 
+------------------------------------------------------------
+5/16/2022 - VERSION=1.2.2b
+Merged Jacky Ko's "dos2unix" related changes (ac_save, ac_diff and ac_copy)
+
+------------------------------------------------------------
+5/17/2022 -
+updated flowExceptions to add search string to enable skipping flow with HVOC block
+
+------------------------------------------------------------
+5/25/2022 -
+Script ac_set_env_other to set up Gitbash/Mac Terminal path variables
+
 
  

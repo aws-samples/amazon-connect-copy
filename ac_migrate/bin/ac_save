@@ -12,22 +12,30 @@
 # Added support to migrate Quick Connects
 #
 ############################################################
+VERSION=1.2.2b
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
+# Usage: connect_save [-?fseCv] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+#     -C                      Produce compact contact flow/module JSON files (useful if those files exceed the API size limit)
 
 USAGE=$(cat <<EOD
-Usage: connect_save [-?fse] [-G ignore_prefix] instance_alias [aws_profile] [contact_flow_prefix]
-    Retrieve resources from an Amazon Connect instance into plain files
+Usage: connect_save [-?fsev] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+    Retrieve components from an Amazon Connect instance into plain files
 
-    instance_alias       Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
-    profile              AWS Profile to use
-    contact_flow_prefix  Prefix of Contact Flows and Modules of interest (all others will be ignored)
-    -f                   Force removal of existing instance_alias directory
-    -s                   Default - Skip unpublished contact flow modules and contact flows with an error, instead of failing
-    -e                   Proceed even when the Bash shell may not encode Extended ASCII characters properly
-    -G ignore_prefix     Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
-    -?                   Help
+    instance_alias          Alias of the Connect instance (or path to the directory to save, with the alias being the basename)
+    -f                      Force removal of existing instance_alias directory
+    -s                      Skip unpublished contact flow modules and contact flows with an error (instead of failing)
+    -e                      Proceed even when the system may not encode Extended ASCII characters properly
+    -v                      Show version of this script
+    -p profile              AWS Profile to use
+    -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
+    -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
+    -?                      Help
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() {
     if [ "$#" -ne 0 ]; then
@@ -64,30 +72,17 @@ EOD
     exit 1
 }
 
-# # A workaround for contact flow modules created before 1 Dec 2021.
-# fix_module_json() {
-#     # A workaround for AWS CLI failed to create contact flow modules
-#     # with Transitions Errors and Conditions in the EndFlowModuleExecution block.
-#     module_json=$1
-#     x=$(jq -r ".Actions[] | select(.Type == \"EndFlowModuleExecution\") | .Transitions" "$module_json")
-#     if [ "$x" == "{}" ]; then
-#         return
-#     fi
-#     ii=0
-#     cat "$module_json" > $TEMPFILE
-#     cat "$TEMPFILE" |
-#     jq -r ".Actions | map(.Type == \"EndFlowModuleExecution\") | .[]" |
-#     while read x; do
-#         if [ "$x" == "true" ]; then
-#             # Transitions Errors and Conditions found at Action[ii] - delete them
-#             cat "$module_json" > $TEMPFILE2
-#             jq "del(.Actions[$ii].Transitions.Errors, .Actions[$ii].Transitions.Conditions)" $TEMPFILE2 > "$module_json"
-#         fi
-#         ii=$[ii+1]
-#     done
-# }
-
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
+# hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -103,6 +98,8 @@ path_encode()  {
     LC_COLLATE=$old_lc_collate
 }
 
+# AWS CLI needs to output JSON
+export AWS_DEFAULT_OUTPUT=json
 aws_connect() {
     local cmd=""
     local ii
@@ -133,11 +130,17 @@ ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
-while getopts "?fseG:" arg; do
+# jq_compact_flag=
+# while getopts "?fseCvp:c:G:" arg; do
+while getopts "?fsevp:c:G:" arg; do
     case "$arg" in
     f)  forced=on;;
     s)  skip_cf_errors=on;;
     e)  ignore_improper_extended_ascii=on;;
+    # C)  jq_compact_flag=" -c";;
+    v)  version;;
+    p)  profile=$OPTARG;;
+    c)  contact_flow_prefix=$OPTARG;;
     G)  ignore_prefix=$OPTARG
         jq_prefix_filter=" | select(.Name | test(\"^($ignore_prefix)\") | not)"
         jq_prefix_filter_text=" excluding those with names prefixed with \"$ignore_prefix\""
@@ -148,14 +151,14 @@ done
 shift $((OPTIND-1))
 
 if [ "$(hex_code "é")" != "%C3%A9" ]; then
-    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly." >&2
+    echo "WARNING: This system may not encode Extended ASCII characters properly." >&2
     if [ -n "$ignore_improper_extended_ascii" ]; then
         echo "Proceed regardless as the -e option is specified." >&2
     else
         cat <<EOD >&2
 
 If your instance component names contain Extended ASCII characters, such as accented letters
-like é, this Bash shell will encode those names differently from standard Bash shell encoding.
+like é, this system will encode those names differently from standard encoding.
 
 If you are sure that your component names do not contain Extended ASCII characters,
 you may proceed regardless by running the command again with the -e option.
@@ -166,10 +169,13 @@ fi
 
 instance_alias_dir=$1
 instance_alias=$(basename "$instance_alias_dir")
-profile=$2
+
+# Backward compatibility - if it is set, ignore the argument
+profile=${profile:-$2}
 profile_flag=${profile:+ --profile $profile}
 
-contact_flow_prefix=$3
+# Backward compatibility - if it is set, ignore the argument
+contact_flow_prefix=${contact_flow_prefix:-$3}
 contact_flow_prefix_filter=${contact_flow_prefix:+" | select(.Name | test(\"^($contact_flow_prefix|Default ).*\"))"}
 contact_flow_prefix_text="${contact_flow_prefix:+ with names prefixed with \"$contact_flow_prefix\" or Default}"
 
@@ -215,7 +221,9 @@ aws_connect list-instances --max-items $maxitems > $TEMPFILE || error $LINENO
 instance_id=$(cat $TEMPFILE |
 jq -r ".InstanceSummaryList[] | select(.InstanceAlias == \"$instance_alias\")" |
 tee "$instance_alias_dir/instance.json" |
-jq -r ".Id")
+jq -r ".Id" |
+dos2unix)
+
 echo "Instance ID: $instance_id"
 
 test -n "$instance_id" || error "Instance $instance_alias does not exist"
@@ -261,6 +269,7 @@ tee "$instance_alias_dir/hours.json" |
 echo -e "\n$(jq -s "length") hours of operations listed in \"$instance_alias_dir/hours.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/hours.json" |
+dos2unix |
 while read hour_id hour_name; do
     echo "Exporting hours of operation $hour_name"
     hour_name_encoded=$(path_encode "$hour_name")
@@ -289,6 +298,7 @@ tee "$instance_alias_dir/queues.json" |
 echo -e "\n$(jq -s "length") queues listed in \"$instance_alias_dir/queues.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/queues.json" |
+dos2unix |
 while read queue_id queue_name; do
     echo "Exporting queue $queue_name"
     queue_name_encoded=$(path_encode "$queue_name")
@@ -323,6 +333,7 @@ tee "$instance_alias_dir/routings.json" |
 echo -e "\n$(jq -s "length") routing profiles listed in \"$instance_alias_dir/routings.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/routings.json" |
+dos2unix |
 while read routing_id routing_name; do
     echo "Exporting routing profile $routing_name"
     routing_name_encoded=$(path_encode "$routing_name")
@@ -363,6 +374,7 @@ echo -e "\n$(jq -s "length") contact flow modules listed in \"$instance_alias_di
 
 cat "$instance_alias_dir/modules.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
+dos2unix |
 while read module_id module_name; do
     echo "Exporting contact flow module $module_name"
     module_name_encoded=$(path_encode "$module_name")
@@ -373,7 +385,7 @@ while read module_id module_name; do
     if [ -s $TEMPCF ]; then
         # Status == "saved" is considered a failure,
         # not to copy an unpublished contact flow module
-        cf_status=$(jq -r ".ContactFlowModule.Status" $TEMPCF)
+        cf_status=$(jq -r ".ContactFlowModule.Status" $TEMPCF | dos2unix)
         if [ "$cf_status" != "published" ]; then
             echo
             echo "$module_name: Contact flow module not published"
@@ -416,6 +428,7 @@ echo -e "\n$(jq -s "length") contact flows listed in \"$instance_alias_dir/flows
 
 cat "$instance_alias_dir/flows.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
+dos2unix |
 while read flow_id flow_name; do
     echo "Exporting contact flow $flow_name"
     flow_name_encoded=$(path_encode "$flow_name")
@@ -450,6 +463,7 @@ cat $TEMPFILE |
 echo -e "\n$(jq -s "length") quick connects listed in \"$instance_alias_dir/quickconnects.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/quickconnects.json" |
+dos2unix |
 while read qc_id qc_name; do
     echo "Exporting quick connect $qc_name"
     qc_name_encoded=$(path_encode "$qc_name")

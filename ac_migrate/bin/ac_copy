@@ -5,20 +5,29 @@
 # Copy Amazon Connect instance A to instance B safely
 #
 
+VERSION=1.2.2b
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
+# Usage: $(basename $0) [-?deCv] helper
+#     -C      Produce compact contact flow/module JSON files (for the updated targetflows/modules)
+
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?de] helper
+Usage: $(basename $0) [-?dev] helper
     Copy Amazon Connect instance A to instance B safely, based on the
-    connect_list and connect_diff results, under the helper directory
+    connect_save and connect_diff results, under the helper directory
     creating new components in helper.new, updating old components in helper.old,
     and updating references defined in helper.sed.
 
-    helper        Name of the helper directory
-    -d            Dry run - Run through the script but not updating the target instance
-    -e            Proceed even when the Bash shell may not encode Extended ASCII characters properly
-    -?            Help
+    helper  Name of the helper directory
+    -d      Dry run - Run through the script but not updating the target instance
+    -e      Proceed even when the system may not encode Extended ASCII characters properly
+    -v      Show version of this script
+    -?      Help
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() {
     if [[ ! "$1" =~ ^[[:digit:]]+$ ]]; then
@@ -40,7 +49,17 @@ EOD
     exit 1
 }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
+# hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -62,19 +81,44 @@ path_decode() {
 }
 
 diff_files() {
-    # Compare TEMPA (sedded and sorted into TEMPFILE) and TEMPB (sorted inline).
+    # Compare TEMPA (sedded into TEMP1 and sorted into TEMP2) and TEMPB (sorted inline).
     # If same, return 0. If different, show the difference unsorted,
     # then ask if want to update. Return 1 if needs update and 0 otherwise.
-    sed -f "$helper_sed" $TEMPA | tee $TEMPA2 | sort > $TEMPA3
-    sort $TEMPB | diff -qbB - $TEMPA3 &> /dev/null
+    sed -f "$helper_sed" $TEMPA | tee $TEMP1 | sort > $TEMP2
+    sort $TEMPB | diff -qbB - $TEMP2 &> /dev/null
     if [ $? -eq 0 ]; then
         echo "same"
     else
-        # sdiff $TEMPB $TEMPA2
-        echo "need to update"
+        # sdiff $TEMPB $TEMP1
+        echo "changed"
     fi
 }
 
+sub_lex_bot() {
+    if [ -z "$lex_bot_prefix_a" -a -z "$lex_bot_prefix_b" ]; then
+        cat
+    else
+        cat > $TEMP1
+        local lexExists=$(cat $TEMP1 | jq ".Actions[] | select(.Type == \"ConnectParticipantWithLexBot\") | has(\"Type\")")
+        if [ -z "$lexExists" ]; then
+            cat $TEMP1
+        else
+            cat $TEMP1 | jq "
+.Actions[] |
+if .Type == \"ConnectParticipantWithLexBot\"
+then .Parameters.LexBot.Name = (.Parameters.LexBot.Name |
+    sub(\"^$lex_bot_prefix_a\"; \"$lex_bot_prefix_b\"))
+else .
+end
+" > $TEMP2
+            cat $TEMP1 |
+            jq -r --slurpfile actions $TEMP2 ".Actions = \$actions"
+        fi
+    fi
+}
+
+# AWS CLI needs to output JSON
+export AWS_DEFAULT_OUTPUT=json
 aws_connect() {
     local cmd=""
     local ii
@@ -104,8 +148,10 @@ TEMPB=${TEMPFILE}_B
 TEMPA2=${TEMPFILE}_A2
 TEMPA3=${TEMPFILE}_A3
 TEMPA4=${TEMPFILE}_A4
-trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3 $TEMPA4' EXIT
-touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3 $TEMPA4
+TEMP1=${TEMPFILE}_1
+TEMP2=${TEMPFILE}_2
+trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3 $TEMPA4 $TEMP1 $TEMP2' EXIT
+touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3 $TEMPA4 $TEMP1 $TEMP2
 
 ## Set directories
 homedir=`pwd`
@@ -118,24 +164,26 @@ flowExceptions="${rscdir}/flowExceptions"
 actionLead="# Action -"
 dryrun=
 ignore_improper_extended_ascii=
-while getopts "?de" arg; do
+while getopts "?dev" arg; do
     case "$arg" in
     d)  dryrun=on; echo "Dry Run";;
     e)  ignore_improper_extended_ascii=on;;
+    # C)  jq_compact_flag=" -c";;
+    v)  version;;
     *)  usage;;
     esac
 done
 shift $((OPTIND-1))
 
 if [ "$(hex_code "é")" != "%C3%A9" ]; then
-    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly." >&2
+    echo "WARNING: This system may not encode Extended ASCII characters properly." >&2
     if [ -n "$ignore_improper_extended_ascii" ]; then
         echo "Proceed regardless as the -e option is specified." >&2
     else
         cat <<EOD >&2
 
 If your instance component names contain Extended ASCII characters, such as accented letters
-like é, this Bash shell will encode those names differently from standard Bash shell encoding.
+like é, this system will encode those names differently from standard encoding.
 
 If you are sure that your component names do not contain Extended ASCII characters,
 you may proceed regardless by running the command again with the -e option.
@@ -269,11 +317,10 @@ else
         hour_name_decoded=$(path_decode "$hour_name")
 	h_desc_new=$hour_name_decoded
 
-        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json")
-
+        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json" | dos2unix)
 ################
 	## Lets make sure description is not null
-	hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json")
+	hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json" | dos2unix)
 
 	## if description does not exist then set to same as name
 	if [ "$hour_desc" = "null" -o "$hour_desc" = "" ]; then
@@ -316,8 +363,7 @@ EOD
         aws_connect create-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             > "$helper/output_$hour_json" || error $LINENO
-        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json")
-
+        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json" | dos2unix)
         aws_connect describe-hours-of-operation \
             --instance-id $instance_id_b \
             --hours-of-operation-id $hour_id_b \
@@ -366,9 +412,9 @@ else
         df=$(diff_files); echo $df; test "$df" == "same" && continue
         echo "Updating $hour_json"
 
-        hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json")
+	hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json" | dos2unix)
         arg_flags=$(cat "$instance_alias_dir_b/$hour_json" |
-            jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId")
+		jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId" | dos2unix)
         cat "$instance_alias_dir_a/$hour_json" |
         jq --arg iid $instance_id_b $arg_flags \
             ".HoursOfOperation | del(.HoursOfOperationArn, .Tags) | . + { InstanceId: \$iid, HoursOfOperationId: \$id }" \
@@ -435,12 +481,12 @@ else
         queue_name_decoded=$(path_decode "$queue_name")
 	q_desc_new=$queue_name_decoded
 
-        queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json")
+	queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json" | dos2unix)
 
 ################
 	## Lets make sure queue description is not null and max contacts not equal to MaxContacts
-	queue_desc=$(jq -r ".Queue.Description" "$instance_alias_dir_a/$queue_json")
-	max_contacts=$(jq -r ".Queue.MaxContacts" "$instance_alias_dir_a/$queue_json")
+	queue_desc=$(jq -r ".Queue.Description" "$instance_alias_dir_a/$queue_json" | dos2unix)
+	max_contacts=$(jq -r ".Queue.MaxContacts" "$instance_alias_dir_a/$queue_json" | dos2unix)
 	if [ $max_contacts = null ]; then
 		max_contacts=0
 	fi
@@ -511,7 +557,7 @@ EOD
         aws_connect create-queue \
             --cli-input-json "file://$helper/$queue_json" \
             > "$helper/output_$queue_json" || error $LINENO
-        queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json")
+	queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json" | dos2unix)
 
         aws_connect describe-queue \
             --instance-id $instance_id_b \
@@ -662,8 +708,8 @@ else
         routing_name=${routing_name%.json}
         routing_name_decoded=$(path_decode "$routing_name")
 
-        routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json")
-        routing_new_file=$(gen_helper_routing_new "$routing_name")
+	routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json" | dos2unix)
+        routing_new_file=$(gen_helper_routing_new "$routing_name" | dos2unix)
         out_file="$helper/output_routing_new_$routing_name.json"
 
         cat <<EOD >> "$helper_log"
@@ -688,7 +734,7 @@ EOD
         aws_connect create-routing-profile \
             --cli-input-json "file://$routing_new_file" \
             > "$out_file" || error $LINENO
-        routing_id_b=$(jq -r ".RoutingProfileId" "$out_file")
+	routing_id_b=$(jq -r ".RoutingProfileId" "$out_file" | dos2unix)
 
         # All routing profiles will be updated with queues
         echo "$routing_json" >> $TEMPOLD
@@ -766,7 +812,7 @@ else
         echo "Updating $routing_json"
 
         # routing_old_file=$(gen_helper_routing_old "$routing_name")
-        routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json")
+	routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json" | dos2unix)
 
         if [ "$df_r" != "same" ]; then
             # Update Routing Profile of Instance B ahead of time
@@ -777,11 +823,10 @@ else
                 sed -f "$helper_sed" > "$instance_alias_dir_b/$routing_json"
             fi
 
-            routing_doq_b=$(cat "$instance_alias_dir_b/$routing_json" |
-                jq -r ".RoutingProfile.DefaultOutboundQueueId")
+            routing_doq_b=$(cat "$instance_alias_dir_b/$routing_json" | jq -r ".RoutingProfile.DefaultOutboundQueueId" | dos2unix)
 
             cat "$instance_alias_dir_b/$routing_json" |
-            jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" |
+            jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" | dos2unix |
             jq -s > "$helper/routingConcurrency_$routing_name.json"
 
             cat <<EOD >> "$helper_log"
@@ -831,7 +876,7 @@ EOD
    ## Above is commented out as it does not work if only priority and/or delay seconds are changed
                 jq -r ".RoutingProfileQueueConfigSummaryList[]| {QueueName, Priority, Delay, Channel}" | jq -c |
                    sort > $TEMPA
-## sort -u is an issue if other channel for same queue name is enable; so removing "-u"
+## sort -u is an issue if other channel for same queue name is enabled; so removing "-u"
 #                sort -u > $TEMPA
 
             cat "$instance_alias_dir_b/routingQs_$routing_name.json" |
@@ -1021,7 +1066,7 @@ else
         module_name_decoded=$(path_decode "$module_name")
 
         ## module_id_a=$(jq -r "select(.Name == \"$module_name_decoded\") | .Id" "$instance_alias_dir_a/modules.json")
-        module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id") 
+	module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id" | dos2unix)
        out_file="$helper/output_$module_json"
 
         # Contact Flow Module template file
@@ -1067,7 +1112,7 @@ EOD
             --description "$module_desc" \
             --content "file://$helper/$module_json" \
             > "$out_file" || error $LINENO
-        module_id_b=$(jq -r ".Id" "$out_file")
+	module_id_b=$(jq -r ".Id" "$out_file" | dos2unix)
 
         # All flows will be updated with content
         # echo "$module_json" >> $TEMPOLD
@@ -1128,11 +1173,11 @@ else
         module_name_decoded=$(path_decode "$module_name")
 
  	## we need to find exact module name match - use regular expressions ^ and $ ignoring case ("i")
-        module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name | match(\"^${module_name_decoded//\"/%22}$\";\"i\")) | .Id")
+	module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name | match(\"^${module_name_decoded//\"/%22}$\";\"i\")) | .Id" | dos2unix)
 	## if module name has some exception characters, lower-case/upper-case differences, brackets, etc. and if we cannot find the id then skip instead of generating error
 	skip_module="n"
 	if [ "$module_id_b" == "" ]; then
-		module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
+		module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id" | dos2unix)
 		if [ $module_id_b == "" ]; then
 			skip_module="y"
 		fi
@@ -1233,9 +1278,9 @@ else
         flow_name_decoded=$(path_decode "$flow_name")
 
         # flow_type=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
-        flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType")
+	flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType" | dos2unix)
         # flow_id_a=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/flows.json")
-        flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
+	flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id" | dos2unix)
 
         out_file="$helper/output_$flow_json"
 
@@ -1298,7 +1343,7 @@ EOD
             --description "$flow_desc" \
             --content "file://$flow_template_file" \
             > "$out_file" || error $LINENO
-        flow_id_b=$(jq -r ".ContactFlowId" "$out_file")
+		    flow_id_b=$(jq -r ".ContactFlowId" "$out_file" | dos2unix)
 
         # All flows will be updated with content
         echo "$flow_json" >> $TEMPOLD
@@ -1359,11 +1404,11 @@ else
         flow_name_decoded=$(path_decode "$flow_name")
 
 	## we need to find exact flow name match - use regular expressions ^ and $ ignoring case ("i")
-	flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name | match(\"^${flow_name_decoded//\"/%22}$\";\"i\")) | .Id")
+	flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name | match(\"^${flow_name_decoded//\"/%22}$\";\"i\")) | .Id" | dos2unix)
 	## if flow name has some exception characters, lower-case/upper-case differences, brackets, etc. and if we cannot find the id then skip instead of generating error
 	skip_flow="n"
 	if [ "$flow_id_b" == "" ]; then
-	        flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
+		flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id" | dos2unix)
 		if [ $flow_id_b == "" ]; then
 			skip_flow="y"
 		fi
@@ -1434,7 +1479,7 @@ lambdaArnLead=arn:aws:lambda:$region_b:$aws_ac_b:function:
 cat \
     "$instance_alias_dir_b/flow_"* \
     "$instance_alias_dir_b/module_"* 2> /dev/null |
-    jq -r ".Actions[] | select(.Type == \"InvokeLambdaFunction\") | .Parameters.LambdaFunctionARN" |
+    jq -r ".Actions[] | select(.Type == \"InvokeLambdaFunction\") | .Parameters.LambdaFunctionARN" | dos2unix |
     grep "$lambdaArnLead" |
     sort -u > $TEMPFILE
 
@@ -1510,7 +1555,7 @@ else
 		qc_name=${qc_json#quickconnect_}
 		qc_name=${qc_name%.json}
 	        qc_name_decoded=$(path_decode "$qc_name")
-		qc_id_a=$(jq -r ".QuickConnect.QuickConnectId" "$instance_alias_dir_a/$qc_json")
+		qc_id_a=$(jq -r ".QuickConnect.QuickConnectId" "$instance_alias_dir_a/$qc_json" | dos2unix)
 		cat "$instance_alias_dir_a/$qc_json" |
 			jq --arg instance_id $instance_id_b \
 			".QuickConnect | del(.QuickConnectARN, .QuickConnectId) | . + { InstanceId: \$instance_id}" |
@@ -1546,7 +1591,7 @@ EOD
 		aws_connect create-quick-connect \
 			--cli-input-json "file://$helper/$qc_json" \
 			> "$helper/output_$qc_json" || error $LINENO
-			qc_id_b=$(jq -r ".QuickConnectId" "$helper/output_$qc_json")
+		qc_id_b=$(jq -r ".QuickConnectId" "$helper/output_$qc_json" | dos2unix)
 
 		aws_connect describe-quick-connect \
 			--instance-id $instance_id_b \
@@ -1630,16 +1675,16 @@ else
 
 	if [ -z "$dryrun" ]; then
 		## We need to associate quick connect to this queue
-		queue_id_b=$(jq -r ".Queue.QueueId" "$instance_alias_dir_b/$queue_json")
+		queue_id_b=$(jq -r ".Queue.QueueId" "$instance_alias_dir_b/$queue_json" | dos2unix)
 	        cat "$instance_alias_dir_a/$queue_qc_json" | sed -f "$helper_sed" > "$helper/$queue_qc_json"
 		## Associate all quick connects to this queue but skip the quick connect type USER
-		cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType != \"USER\") | .Id" |
+		cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType != \"USER\") | .Id" | dos2unix |
 		while read qcid; do
 			aws_connect associate-queue-quick-connects \
 				--instance-id $instance_id_b --queue-id $queue_id_b --quick-connect-ids $qcid \
 				> $TEMPFILE || error $LINENO
 		done
-		cnt=`cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType == \"USER\") | .Id" | wc -l`
+		cnt=`cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType == \"USER\") | .Id" | dos2unix | wc -l`
 		if [ "$cnt" -gt "0" ]; then
 			## There is a quick connect in this queue of type USER - Mark it to update this queue manually
 			echo "$queue_qc_json|qQC" >> $helper_skip

@@ -1,39 +1,58 @@
+
 #!/bin/bash
 
 ############################################################
 #
 # Find the differences of instance A and instance B and produce helper files.
 # Note: This script does not use AWS CLI but instead uses results from
-#   connect_list on instance A and B.
+#   connect_save on instance A and B.
 #
 # Added support to use mapping file for Lambda and Lex
 # This is useful when Lambda function name in destination account is different then in source account
 # 
 #
 
+VERSION=1.2.2b
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
 USAGE=$(cat <<EOD
-Usage: $(basename $0) [-?fe] instance_alias_a instance_alias_b helper [lambda_prefix_a] [lambda_prefix_b]
-    Based on connect_list result on Amazon Connect instance A and B,
-    find the differences and produce helper files to safely copy resources from A to B.
+Usage: $(basename $0) [-?fev] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
+    Based on connect_save result on Amazon Connect instance A and B,
+    find the differences and produce helper files to safely copy components from A to B.
 
-    instance_alias_a  Alias of the Connect instance A
-    instance_alias_b  Alias of the Connect instance B
-                      (Aliases can be a path to the directory where the instance was saved using connect_save.)
-    helper            Name of the helper directory
-    lambda_prefix_a   Lambda function name prefix in instance A to be replaced with <lambda_prefix_b>
-    lambda_prefix b   Lambda function name prefix in instance B replacing <lambda_prefix_a>
-    -f                Force removal of existing helper directory
-    -e                Proceed even when the Bash shell may not encode Extended ASCII characters properly
-    -?                Help
+    instance_alias_a    Alias of the Connect instance A
+    instance_alias_b    Alias of the Connect instance B
+                        (Aliases can be a path to the directory where the instance was saved using connect_save.)
+    helper              Name of the helper directory
+    -f                  Force removal of existing helper directory
+    -e                  Proceed even when the system may not encode Extended ASCII characters properly
+    -v                  Show version of this script
+    -l lambda_prefix_a=lambda_prefix_b
+                        Lambda function name prefixes for instances A and B (if different) to be replaced during copying
+    -b lex_bot_prefix_a=lex_bot_prefix_b
+                        Lex bot (Classic) name prefixes for instances A and B (if different) to be replaced during copying
+    -?                  Help
 
-    Note: This script create files in the helper directory without changing any instance resource files.
+    Note: This script create files in the helper directory without changing any instance component files.
 EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() { echo -e "Error: $1" >&2; exit 1; }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
+# hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -72,7 +91,7 @@ eval_resources() {
    rpq="$5"
    
    jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a"/"$resfile" |
-   tr -d '\r' |
+   dos2unix |
    while read resource_id_a resource_name_a; do
       if [ "$resource_name_a" == "$rp_to_ignore" ]; then
         continue
@@ -80,10 +99,10 @@ eval_resources() {
       resource_name_encoded_a=$(path_encode "$resource_name_a")
 ##      resource_id_b=$(jq -r "select(.Name == \"$resource_name_a\") | .Id" "$instance_alias_dir_b"/"$resfile")
 ##      resource_id_b=$(jq -r "select(.Name == \"${resource_name_a//\"/\\\"}\") | .Id" "$instance_alias_dir_b"/"$resfile")
-      resource_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b"/"$resfile" | jq -r "select(.Name == \"${resource_name_a//\"/%22}\") | .Id")
+      resource_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b"/"$resfile" | jq -r "select(.Name == \"${resource_name_a//\"/%22}\") | .Id" | dos2unix)
       if [ -z "$resource_id_b" ]; then
 	## Resource does not exist in destination - let's do case insensitive check to make sure with regex (^ and $ for exact match)
-	resource_id_b=$(jq -r -c "select(.Name | match(\"^$resource_name_a$\";\"i\")) |  .Id" "$instance_alias_dir_b"/"$resfile")
+	resource_id_b=$(jq -r -c "select(.Name | match(\"^$resource_name_a$\";\"i\")) |  .Id" "$instance_alias_dir_b"/"$resfile" | dos2unix)
   	if [ -z "$resource_id_b" ]; then
 		## Resource does not exist in destination
         	add_file "$instance_alias_dir_a" "${resource}${resource_name_encoded_a}.json" $helper_new
@@ -131,27 +150,37 @@ EOD
 } ## End of eval_resources
 ###########################################################################################################
 
-
 forced=
 ignore_improper_extended_ascii=
-while getopts "?fe" arg; do
+lambda_prefix_a=
+lambda_prefix_b=
+lex_bot_prefix_a=
+lex_bot_prefix_b=
+while getopts "?fevl:b:" arg; do
     case "$arg" in
     f)  forced=on;;
     e)  ignore_improper_extended_ascii=on;;
+    v)  version;;
+    l)  lambda_prefix_a=${OPTARG%%=*}
+        lambda_prefix_b=${OPTARG#*=}
+        ;;
+    b)  lex_bot_prefix_a=${OPTARG%%=*}
+        lex_bot_prefix_b=${OPTARG#*=}
+        ;;
     *)  usage;;
     esac
 done
 shift $((OPTIND-1))
 
 if [ "$(hex_code "é")" != "%C3%A9" ]; then
-    echo "WARNING: This Bash shell may not encode Extended ASCII characters properly." >&2
+    echo "WARNING: This system may not encode Extended ASCII characters properly." >&2
     if [ -n "$ignore_improper_extended_ascii" ]; then
         echo "Proceed regardless as the -e option is specified." >&2
     else
         cat <<EOD >&2
 
 If your instance component names contain Extended ASCII characters, such as accented letters
-like é, this Bash shell will encode those names differently from standard Bash shell encoding.
+like é, this system will encode those names differently from standard encoding.
 
 If you are sure that your component names do not contain Extended ASCII characters,
 you may proceed regardless by running the command again with the -e option.
@@ -166,8 +195,10 @@ instance_alias_dir_b=$2
 instance_alias_b=$(basename "$instance_alias_dir_b")
 # helper=${3:-${instance_alias_a}_TO_${instance_alias_b}}
 helper=$3
-lambda_prefix_a=$4
-lambda_prefix_b=$5
+
+# Backward compatibility - if they are set, ignore the arguments
+lambda_prefix_a=${lambda_prefix_a:-$4}
+lambda_prefix_b=${lambda_prefix_b:-$5}
 
 ## Set directories
 homedir=`pwd`
@@ -225,9 +256,9 @@ done
 # Instance
 #
 
-echo "instance_alias_a=$instance_alias_a" | tee -a $helper_var
+echo "instance_alias_a=\"$instance_alias_a\"" | tee -a $helper_var
 echo "instance_alias_dir_a=\"$instance_alias_dir_a\"" | tee -a $helper_var
-echo "instance_alias_b=$instance_alias_b" | tee -a $helper_var
+echo "instance_alias_b=\"$instance_alias_b\"" | tee -a $helper_var
 echo "instance_alias_dir_b=\"$instance_alias_dir_b\"" | tee -a $helper_var
 
 . "$instance_alias_dir_a/instance.var"
@@ -238,11 +269,13 @@ eval $(echo $instance_arn_a | (IFS=: read x x x r a x; echo "region_a=$r; aws_ac
 region_a=$region_a
 aws_ac_a=$aws_ac_a
 aws_profile_a=$aws_Profile
-echo instance_id_a=$instance_id_a | tee -a $helper_var
-echo instance_arn_a=$instance_arn_a | tee -a $helper_var
-echo region_a=$region_a | tee -a $helper_var
-echo aws_ac_a=$aws_ac_a | tee -a $helper_var
-echo aws_profile_a=$aws_Profile | tee -a $helper_var
+echo "instance_id_a=\"$instance_id_a\"" | tee -a $helper_var
+echo "instance_arn_a=\"$instance_arn_a\"" | tee -a $helper_var
+echo "region_a=\"$region_a\"" | tee -a $helper_var
+echo "aws_ac_a=\"$aws_ac_a\"" | tee -a $helper_var
+echo "aws_profile_a=\"$aws_Profile\"" | tee -a $helper_var
+echo "lambda_prefix_a=\"$lambda_prefix_a\"" | tee -a $helper_var
+echo "lex_bot_prefix_a=\"$lex_bot_prefix_a\"" | tee -a $helper_var
 
 . "$instance_alias_dir_b/instance.var"
 instance_id_b=$instance_Id
@@ -251,11 +284,13 @@ eval $(echo $instance_arn_b | (IFS=: read x x x r a x; echo "region_b=$r; aws_ac
 region_b=$region_b
 aws_ac_b=$aws_ac_b
 aws_profile_b=$aws_Profile
-echo instance_id_b=$instance_id_b | tee -a $helper_var
-echo instance_arn_b=$instance_arn_b | tee -a $helper_var
-echo region_b=$region_b | tee -a $helper_var
-echo aws_ac_b=$aws_ac_b | tee -a $helper_var
-echo aws_profile_b=$aws_Profile | tee -a $helper_var
+echo "instance_id_b=\"$instance_id_b\"" | tee -a $helper_var
+echo "instance_arn_b=\"$instance_arn_b\"" | tee -a $helper_var
+echo "region_b=\"$region_b\"" | tee -a $helper_var
+echo "aws_ac_b=\"$aws_ac_b\"" | tee -a $helper_var
+echo "aws_profile_b=\"$aws_Profile\"" | tee -a $helper_var
+echo "lambda_prefix_b=\"$lambda_prefix_b\"" | tee -a $helper_var
+echo "lex_bot_prefix_b=\"$lex_bot_prefix_b\"" | tee -a $helper_var
 
 # Use Instance B contact flow prefix
 echo "contact_flow_prefix=\"$instance_contact_flow_prefix\"" | tee -a $helper_var
@@ -341,11 +376,11 @@ echo
 
 echo Checking Prompts ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/prompts.json" |
-tr -d '\r' |
+dos2unix |
 while read prompt_id_a prompt_name; do
     prompt_name_encoded=$(path_encode "$prompt_name")
     # prompt_id_b=$(jq -r "select(.Name == \"${prompt_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/prompts.json")
-    prompt_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/prompts.json" | jq -r "select(.Name == \"${prompt_name//\"/%22}\") | .Id")
+    prompt_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/prompts.json" | jq -r "select(.Name == \"${prompt_name//\"/%22}\") | .Id" | dos2unix)
     if [ -z "$prompt_id_b" ]; then
         echo "prompt_$prompt_name" >> $helper_new
     else

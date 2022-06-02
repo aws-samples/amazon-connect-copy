@@ -1,0 +1,20 @@
+#!/bin/bash
+
+## ########################################################################
+## Collection of commands to prepare the bash script execution environment
+## to migrate from one Connect environment to another
+## Use to set path for Gitbash (Windows) and Terminal (Mac) environments
+## #########################################################################
+##
+## Set directories
+homedir=`pwd`
+##
+cd ${homedir}
+chmod 700 ac*
+chmod 700 jq
+PATH=$PATH:"${homedir}"
+export PATH
+cd ..
+echo "DONE"
+##
+## DONE
