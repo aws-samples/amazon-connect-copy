@@ -7,7 +7,7 @@
 #   connect_save on instance A and B.
 #
 
-VERSION=1.1
+VERSION=1.2
 SCRIPT_VERSION="$(basename $0) $VERSION"
 
 USAGE=$(cat <<EOD
@@ -33,10 +33,20 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() { echo -e "Error: $1" >&2; exit 1; }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -228,11 +238,11 @@ echo
 
 echo Checking Prompts ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/prompts.json" |
-tr -d '\r' |
+dos2unix |
 while read prompt_id_a prompt_name; do
     prompt_name_encoded=$(path_encode "$prompt_name")
     # prompt_id_b=$(jq -r "select(.Name == \"${prompt_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/prompts.json")
-    prompt_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/prompts.json" | jq -r "select(.Name == \"${prompt_name//\"/%22}\") | .Id")
+    prompt_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/prompts.json" | jq -r "select(.Name == \"${prompt_name//\"/%22}\") | .Id" | dos2unix)
     if [ -z "$prompt_id_b" ]; then
         echo "prompt_$prompt_name" >> $helper_new
     else
@@ -253,11 +263,11 @@ test $? -eq 0 || error
 
 echo Checking Hours of operations ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/hours.json" |
-tr -d '\r' |
+dos2unix |
 while read hour_id_a hour_name; do
     hour_name_encoded=$(path_encode "$hour_name")
     # hour_id_b=$(jq -r "select(.Name == \"${hour_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/hours.json")
-    hour_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/hours.json" | jq -r "select(.Name == \"${hour_name//\"/%22}\") | .Id")
+    hour_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/hours.json" | jq -r "select(.Name == \"${hour_name//\"/%22}\") | .Id" | dos2unix)
     if [ -z "$hour_id_b" ]; then
         add_file "$instance_alias_dir_a" "hour_$hour_name_encoded.json" $helper_new
     else
@@ -278,11 +288,11 @@ test $? -eq 0 || error
 
 echo Checking Queues ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/queues.json" |
-tr -d '\r' |
+dos2unix |
 while read queue_id_a queue_name; do
     queue_name_encoded=$(path_encode "$queue_name")
     # queue_id_b=$(jq -r "select(.Name == \"${queue_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/queues.json")
-    queue_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/queues.json" | jq -r "select(.Name == \"${queue_name//\"/%22}\") | .Id")
+    queue_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/queues.json" | jq -r "select(.Name == \"${queue_name//\"/%22}\") | .Id" | dos2unix)
     if [ -z "$queue_id_b" ]; then
         add_file "$instance_alias_dir_a" "queue_$queue_name_encoded.json" $helper_new
     else
@@ -303,14 +313,14 @@ test $? -eq 0 || error
 
 echo Checking Routing Profiles ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/routings.json" |
-tr -d '\r' |
+dos2unix |
 while read routing_id_a routing_name; do
     if [ "$routing_name" == "$routing_profile_to_ignore" ]; then
         continue
     fi
     routing_name_encoded=$(path_encode "$routing_name")
     # routing_id_b=$(jq -r "select(.Name == \"${routing_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/routings.json")
-    routing_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/routings.json" | jq -r "select(.Name == \"${routing_name//\"/%22}\") | .Id")
+    routing_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/routings.json" | jq -r "select(.Name == \"${routing_name//\"/%22}\") | .Id" | dos2unix)
     if [ -z "$routing_id_b" ]; then
         add_file "$instance_alias_dir_a" "routing_$routing_name_encoded.json" $helper_new
         add_file "$instance_alias_dir_a" "routingQs_$routing_name_encoded.json" $helper_new
@@ -333,11 +343,11 @@ test $? -eq 0 || error
 
 echo Checking Contact Flow Modules ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/modules.json" |
-tr -d '\r' |
+dos2unix |
 while read module_id_a module_name; do
     module_name_encoded=$(path_encode "$module_name")
     # module_id_b=$(jq -r "select(.Name == \"${module_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/modules.json")
-    module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name//\"/%22}\") | .Id")
+    module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name//\"/%22}\") | .Id" | dos2unix)
     if [ -z "$module_id_b" ]; then
         add_file "$instance_alias_dir_a" "module_$module_name_encoded.json" $helper_new
     else
@@ -358,10 +368,10 @@ test $? -eq 0 || error
 
 echo Checking Contact Flows ...
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/flows.json" |
-tr -d '\r' |
+dos2unix |
 while read flow_id_a flow_name; do
     # flow_id_b=$(jq -r "select(.Name == \"${flow_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/flows.json")
-    flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name//\"/%22}\") | .Id")
+    flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name//\"/%22}\") | .Id" | dos2unix)
     flow_name_encoded=$(path_encode "$flow_name")
     if [ -z "$flow_id_b" ]; then
         add_file "$instance_alias_dir_a" "flow_$flow_name_encoded.json" $helper_new
