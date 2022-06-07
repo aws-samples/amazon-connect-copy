@@ -5,7 +5,7 @@
 # Copy Amazon Connect instance A to instance B safely
 #
 
-VERSION=1.1
+VERSION=1.2
 SCRIPT_VERSION="$(basename $0) $VERSION"
 
 USAGE=$(cat <<EOD
@@ -24,6 +24,7 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() {
     if [[ ! "$1" =~ ^[[:digit:]]+$ ]]; then
@@ -45,7 +46,16 @@ EOD
     exit 1
 }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -85,7 +95,7 @@ sub_lex_bot() {
         cat
     else
         cat > $TEMP1
-        lexExists=$(cat $TEMP1 | jq ".Actions[] | select(.Type == \"ConnectParticipantWithLexBot\") | has(\"Type\")")
+        local lexExists=$(cat $TEMP1 | jq ".Actions[] | select(.Type == \"ConnectParticipantWithLexBot\") | has(\"Type\")")
         if [ -z "$lexExists" ]; then
             cat $TEMP1
         else
@@ -103,6 +113,8 @@ end
     fi
 }
 
+# AWS CLI needs to output JSON
+export AWS_DEFAULT_OUTPUT=json
 aws_connect() {
     local cmd=""
     local ii
@@ -267,10 +279,10 @@ else
         hour_name=${hour_name%.json}
         hour_name_decoded=$(path_decode "$hour_name")
 
-        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json")
+        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json" | dos2unix)
 
         # Description cannot be blank, or the AWS CLI will fail.
-        hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json")
+        hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json" | dos2unix)
         if [ -z "$hour_desc" ]; then
             hour_desc=$hour_name_decoded
         fi
@@ -302,7 +314,7 @@ EOD
         aws_connect create-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             > "$helper/output_$hour_json" || error $LINENO
-        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json")
+        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json" | dos2unix)
 
         aws_connect describe-hours-of-operation \
             --instance-id $instance_id_b \
@@ -349,9 +361,9 @@ else
         df=$(diff_files); echo $df; test "$df" == "same" && continue
         echo "Updating $hour_json"
 
-        hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json")
+        hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json" | dos2unix)
         arg_flags=$(cat "$instance_alias_dir_b/$hour_json" |
-            jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId")
+            jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId" | dos2unix)
         cat "$instance_alias_dir_a/$hour_json" |
         jq --arg iid $instance_id_b $arg_flags \
             ".HoursOfOperation | del(.HoursOfOperationArn, .Tags) | . + { InstanceId: \$iid, HoursOfOperationId: \$id }" \
@@ -417,7 +429,7 @@ else
         queue_name=${queue_name%.json}
         queue_name_decoded=$(path_decode "$queue_name")
 
-        queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json")
+        queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json" | dos2unix)
 
         cat "$instance_alias_dir_a/$queue_json" |
         jq --arg instance_id $instance_id_b \
@@ -446,7 +458,7 @@ EOD
         aws_connect create-queue \
             --cli-input-json "file://$helper/$queue_json" \
             > "$helper/output_$queue_json" || error $LINENO
-        queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json")
+        queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json" | dos2unix)
 
         aws_connect describe-queue \
             --instance-id $instance_id_b \
@@ -563,8 +575,8 @@ else
         routing_name=${routing_name%.json}
         routing_name_decoded=$(path_decode "$routing_name")
 
-        routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json")
-        routing_new_file=$(gen_helper_routing_new "$routing_name")
+        routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json" | dos2unix)
+        routing_new_file=$(gen_helper_routing_new "$routing_name" | dos2unix)
         out_file="$helper/output_routing_new_$routing_name.json"
 
         cat <<EOD >> "$helper_log"
@@ -589,7 +601,7 @@ EOD
         aws_connect create-routing-profile \
             --cli-input-json "file://$routing_new_file" \
             > "$out_file" || error $LINENO
-        routing_id_b=$(jq -r ".RoutingProfileId" "$out_file")
+        routing_id_b=$(jq -r ".RoutingProfileId" "$out_file" | dos2unix)
 
         # All routing profiles will be updated with queues
         echo "$routing_json" >> $TEMPOLD
@@ -662,7 +674,7 @@ else
         echo "Updating $routing_json"
 
         # routing_old_file=$(gen_helper_routing_old "$routing_name")
-        routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json")
+        routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json" | dos2unix)
 
         if [ "$df_r" != "same" ]; then
             # Update Routing Profile of Instance B ahead of time
@@ -674,7 +686,8 @@ else
             fi
 
             routing_doq_b=$(cat "$instance_alias_dir_b/$routing_json" |
-                jq -r ".RoutingProfile.DefaultOutboundQueueId")
+                jq -r ".RoutingProfile.DefaultOutboundQueueId" |
+                dos2unix)
 
             cat "$instance_alias_dir_b/$routing_json" |
             jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" |
@@ -809,7 +822,7 @@ else
         module_name_decoded=$(path_decode "$module_name")
 
         # module_id_a=$(jq -r "select(.Name == \"${module_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/modules.json")
-        module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
+        module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id" | dos2unix)
         out_file="$helper/output_$module_json"
 
         # Contact Flow Module template file
@@ -847,7 +860,7 @@ EOD
             --name "${module_name_decoded//\"/\\\"}" \
             --content "file://$helper/$module_json" \
             > "$out_file" || error $LINENO
-        module_id_b=$(jq -r ".Id" "$out_file")
+        module_id_b=$(jq -r ".Id" "$out_file" | dos2unix)
 
         # All flows will be updated with content
         # echo "$module_json" >> $TEMPOLD
@@ -904,7 +917,7 @@ else
         module_name_decoded=$(path_decode "$module_name")
 
         # module_id_b=$(jq -r "select(.Name == \"${module_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_b/modules.json")
-        module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
+        module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id" | dos2unix)
 
         cat "$instance_alias_dir_a/$module_json" > $TEMPA
         cat "$instance_alias_dir_b/$module_json" > $TEMPB
@@ -988,9 +1001,9 @@ else
         flow_name=${flow_name%.json}
         flow_name_decoded=$(path_decode "$flow_name")
         # flow_type=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
-        flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType")
+        flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType" | dos2unix)
         # flow_id_a=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/flows.json")
-        flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
+        flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id" | dos2unix)
         out_file="$helper/output_$flow_json"
 
         # Contact Flow template file
@@ -1043,7 +1056,7 @@ EOD
             --type $flow_type \
             --content "file://$flow_template_file" \
             > "$out_file" || error $LINENO
-        flow_id_b=$(jq -r ".ContactFlowId" "$out_file")
+        flow_id_b=$(jq -r ".ContactFlowId" "$out_file" | dos2unix)
 
         # All flows will be updated with content
         echo "$flow_json" >> $TEMPOLD
@@ -1099,7 +1112,7 @@ else
         flow_name=${flow_name%.json}
         flow_name_decoded=$(path_decode "$flow_name")
         # flow_id_b=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_b/flows.json")
-        flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
+        flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id" | dos2unix)
 
         cat "$instance_alias_dir_a/$flow_json" > $TEMPA
         cat "$instance_alias_dir_b/$flow_json" > $TEMPB
@@ -1178,8 +1191,8 @@ if [ -s $TEMPFILE ]; then
     while read lambdaArn; do
         ii=$[ii+1]
         echo -n "$ii. $lambdaArn ... "
-        lambdaExist=$(echo $(cat "$helper/lambdas.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
-        if [ "$lambdaExist" -gt 0 ]; then
+        lambdaExists=$(echo $(cat "$helper/lambdas.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
+        if [ "$lambdaExists" -gt 0 ]; then
             echo "already associated"
             continue
         fi
@@ -1250,8 +1263,8 @@ if [ -s $TEMPFILE ]; then
         echo -n "$ii. $lexBot ... "
         lexBotName=${lexBot%%,*}
         lexBotName=${lexBotName#Name=}
-        lexBotExist=$(echo $(cat "$helper/lex-bots.json" | jq ".[] | select(.Name == \"$lexBotName\")" | wc -l))
-        if [ "$lexBotExist" -gt 0 ]; then
+        lexBotExists=$(echo $(cat "$helper/lex-bots.json" | jq ".[] | select(.Name == \"$lexBotName\")" | wc -l))
+        if [ "$lexBotExists" -gt 0 ]; then
             echo "already associated"
             continue
         fi

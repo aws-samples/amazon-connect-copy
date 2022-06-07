@@ -5,7 +5,7 @@
 # Get a list of components of an Amazon Connect instance
 #
 
-VERSION=1.1
+VERSION=1.2
 SCRIPT_VERSION="$(basename $0) $VERSION"
 
 USAGE=$(cat <<EOD
@@ -25,6 +25,7 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() {
     if [ "$#" -ne 0 ]; then
@@ -61,7 +62,16 @@ EOD
     exit 1
 }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -77,6 +87,8 @@ path_encode()  {
     LC_COLLATE=$old_lc_collate
 }
 
+# AWS CLI needs to output JSON
+export AWS_DEFAULT_OUTPUT=json
 aws_connect() {
     local cmd=""
     local ii
@@ -195,7 +207,8 @@ aws_connect list-instances --max-items $maxitems > $TEMPFILE || error $LINENO
 instance_id=$(cat $TEMPFILE |
 jq -r ".InstanceSummaryList[] | select(.InstanceAlias == \"$instance_alias\")" |
 tee "$instance_alias_dir/instance.json" |
-jq -r ".Id")
+jq -r ".Id" |
+dos2unix)
 echo "Instance ID: $instance_id"
 
 test -n "$instance_id" || error "Instance $instance_alias does not exist"
@@ -241,6 +254,7 @@ tee "$instance_alias_dir/hours.json" |
 echo -e "\n$(jq -s "length") hours of operations listed in \"$instance_alias_dir/hours.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/hours.json" |
+dos2unix |
 while read hour_id hour_name; do
     echo "Exporting hours of operation $hour_name"
     hour_name_encoded=$(path_encode "$hour_name")
@@ -269,6 +283,7 @@ tee "$instance_alias_dir/queues.json" |
 echo -e "\n$(jq -s "length") queues listed in \"$instance_alias_dir/queues.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/queues.json" |
+dos2unix |
 while read queue_id queue_name; do
     echo "Exporting queue $queue_name"
     queue_name_encoded=$(path_encode "$queue_name")
@@ -297,6 +312,7 @@ tee "$instance_alias_dir/routings.json" |
 echo -e "\n$(jq -s "length") routing profiles listed in \"$instance_alias_dir/routings.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/routings.json" |
+dos2unix |
 while read routing_id routing_name; do
     echo "Exporting routing profile $routing_name"
     routing_name_encoded=$(path_encode "$routing_name")
@@ -337,6 +353,7 @@ echo -e "\n$(jq -s "length") contact flow modules listed in \"$instance_alias_di
 
 cat "$instance_alias_dir/modules.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
+dos2unix |
 while read module_id module_name; do
     echo "Exporting contact flow module $module_name"
     module_name_encoded=$(path_encode "$module_name")
@@ -347,7 +364,7 @@ while read module_id module_name; do
     if [ -s $TEMPCF ]; then
         # Status == "saved" is considered a failure,
         # not to copy an unpublished contact flow module
-        cf_status=$(jq -r ".ContactFlowModule.Status" $TEMPCF)
+        cf_status=$(jq -r ".ContactFlowModule.Status" $TEMPCF | dos2unix)
         if [ "$cf_status" != "published" ]; then
             echo
             echo "$module_name: Contact flow module not published"
@@ -357,7 +374,6 @@ while read module_id module_name; do
         if [ -s $TEMPCF ]; then
             cat $TEMPCF |
             jq -r '.ContactFlowModule.Content' > "$instance_alias_dir/module_$module_name_encoded.json"
-            # fix_module_json "$instance_alias_dir/module_$module_name_encoded.json"
         fi
     fi
 done
@@ -388,6 +404,7 @@ echo -e "\n$(jq -s "length") contact flows listed in \"$instance_alias_dir/flows
 
 cat "$instance_alias_dir/flows.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
+dos2unix |
 while read flow_id flow_name; do
     echo "Exporting contact flow $flow_name"
     aws_connect describe-contact-flow \
