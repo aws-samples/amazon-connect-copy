@@ -7,7 +7,7 @@
 #   connect_save on instance A and B.
 #
 
-VERSION=1.2
+VERSION=1.2-beta1
 SCRIPT_VERSION="$(basename $0) $VERSION"
 
 USAGE=$(cat <<EOD
