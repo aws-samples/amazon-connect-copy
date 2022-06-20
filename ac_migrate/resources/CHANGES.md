@@ -93,5 +93,22 @@ updated flowExceptions to add search string to enable skipping flow with HVOC bl
 5/25/2022 -
 Script ac_set_env_other to set up Gitbash/Mac Terminal path variables
 
+------------------------------------------------------------
+6/13/2022 -
+resourceMap now supports phone number mapping between source instance and destination instance
+introduced "flowExceptions_phone" file that does not have callerid related search string
+If phone mapping is configured in resourceMap then the flows with hard-coded caller-Id settings (e.g. in Transfer to queue or Outbound whisper flows)
+are migrated. The flow exceptions file used in this case will be flowExceptions_phone.
+If phone mapping is not configured then "flowExceptions" file is used that has search string for caller id, and flows with hard-coded caller-id are skipped
+"save" script exports phone numbers
+"diff" script has logic for phone mapping
 
- 
+------------------------------------------------------------
+6/16/2022 -
+"copy" script now updates queue hours of operations if different from source
+"copy" script now updates queue outbound configuration whisper flow
+"copy" script now updates queue outbound configuration outbound phone number if phone mapping is configured in "resourceMap" file
+
+------------------------------------------------------------
+6/17/2022 -
+"copy" now updates the quick connect queue configuration. if queue configuration or flow is modified in an existing quick connect then that is updated in destination

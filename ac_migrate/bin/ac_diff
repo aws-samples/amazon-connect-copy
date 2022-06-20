@@ -188,6 +188,10 @@ EOD
         exit 1
     fi
 fi
+TEMPFILE1=$(mktemp)
+TEMPFILE2="$TEMPFILE1"_2
+trap 'rm -r -- $TEMPFILE1 $TEMPFILE2' EXIT
+touch $TEMPFILE1 $TEMPFILE2
 
 instance_alias_dir_a=$1
 instance_alias_a=$(basename "$instance_alias_dir_a")
@@ -203,6 +207,10 @@ lambda_prefix_b=${lambda_prefix_b:-$5}
 ## Set directories
 homedir=`pwd`
 rscdir="${homedir}/resources"
+## There are two flow Exceptions file - if we have phone mapping configured then we won't skip flows with hard-coded outbound caller Id set
+## else we have to skip those flows. We will set which flow Execption file to use based phone mapping
+flowExceptions1="${rscdir}/flowExceptions"
+flowExceptions2="${rscdir}/flowExceptions_phone"
 
 ## Added resource name mapping to be replaced from src to dest account
 ## e.g. lambda src-function-name dest-function-name
@@ -310,24 +318,32 @@ s%$connect_arn_prefix_a%$connect_arn_prefix_b%g
 EOD
 
 ### Read resource mapping file and add the sed commands
+## By default we will use flowException file#1 that will skip migrating flows with hard-coded phone numbers
+## If we have phone mapping configured in resourceMap file then we will use flowException file#2
+echo "flowExceptions1" > $TEMPFILE1
+skipPhonemapping=0
+echo $skipPhonemapping > $TEMPFILE2
 if [ -e "$resource_map" ]; then
-   echo "Reading resource mapping to set up Lambda and Lex bots..."
+   echo "Reading resource mapping to set up Lambda, Lex bots, and Phone numbers..."
    cat $resource_map | 
    while read res_type res_src res_dest; do
+    #### check if this is "lambda"
 	if [ "$res_type" = "lambda" ]; then
 		lambda_arn_prefix_a="arn:aws:lambda:$region_a:$aws_ac_a:function:$res_src"
 		lambda_arn_prefix_b="arn:aws:lambda:$region_b:$aws_ac_b:function:$res_dest"
     		echo "s%$lambda_arn_prefix_a%$lambda_arn_prefix_b%g" >> $helper_sed
 	fi
+    #### End of "lambda"
 
+    #### check if this is "bot"
 	if [ "$res_type" = "bot" ]; then
 		## Check if this is bot type v2
 		bot_name=$res_src
-                cnt=`echo $bot_name | grep : | wc -l`
-                if [ "$cnt" == "1" ]; then
-                        ## This is Lex V2 bot
-                        botnameV2=`echo $bot_name | cut -f1 -d':'`
-                        botaliasV2=`echo $bot_name | cut -f2 -d':'`
+        cnt=`echo $bot_name | grep : | wc -l`
+        if [ "$cnt" == "1" ]; then
+            ## This is Lex V2 bot
+            botnameV2=`echo $bot_name | cut -f1 -d':'`
+            botaliasV2=`echo $bot_name | cut -f2 -d':'`
 			## Get bot-Id of this V2 bot
 			v2botid=`aws lexv2-models list-bots --profile $aws_profile_a | jq -r ".botSummaries[] | select(.botName == \"$botnameV2\") | { botId }" | jq -r ".botId"`
 			## now get alias-id using botid
@@ -338,8 +354,8 @@ if [ -e "$resource_map" ]; then
 
 			## now find arn of destination instance bot
 			bot_name=$res_dest
-                        botnameV2=`echo $bot_name | cut -f1 -d':'`
-                        botaliasV2=`echo $bot_name | cut -f2 -d':'`
+            botnameV2=`echo $bot_name | cut -f1 -d':'`
+            botaliasV2=`echo $bot_name | cut -f2 -d':'`
 			## Get bot-Id of this V2 bot
 			v2botid=`aws lexv2-models list-bots --profile $aws_profile_b | jq -r ".botSummaries[] | select(.botName == \"$botnameV2\") | { botId }" | jq -r ".botId"`
 			## now get alias-id using botid
@@ -348,16 +364,36 @@ if [ -e "$resource_map" ]; then
 			v2aliasarn_b=arn:aws:lex:$region_b:$aws_ac_b:bot-alias/$v2botid/$v2aliasid
 			bot_v2_b='"lexV2BotName":"'${botnameV2}'","lexV2BotAliasName":"'${botaliasV2}'"'
 			echo "s%$bot_v2_a%$bot_v2_b%g" >> $helper_sed
-	    		echo "s%$v2aliasarn_a%$v2aliasarn_b%g" >> $helper_sed
+    		echo "s%$v2aliasarn_a%$v2aliasarn_b%g" >> $helper_sed
 		else
 			## This is v1 (Classic) bot
 			## Bot name and region replacement for v1 type of bot
-        	        bot_a='"LexBot":{"Name":"'${res_src}'","Region":"'${region_a}'"'
-                	bot_b='"LexBot":{"Name":"'${res_dest}'","Region":"'${region_b}'"'
+  	        bot_a='"LexBot":{"Name":"'${res_src}'","Region":"'${region_a}'"'
+           	bot_b='"LexBot":{"Name":"'${res_dest}'","Region":"'${region_b}'"'
 	 		echo "s%$bot_a%$bot_b%g" >> $helper_sed
 		fi
        		echo "lex_$res_dest" >> $helper_new
 	fi
+    #### End of "bot"
+
+    #### check if this is "phonenumber"
+	if [ "$res_type" = "phonenumber" -a "$skipPhonemapping" -eq "0" ]; then
+        ## Let's retrieve phone number Id
+		phonenumber_a=`cat "$instance_alias_dir_a/phonenumbers.json" | jq -r "select(.PhoneNumber == \"$res_src\") | { Id }" | jq -r ".Id"`
+		phonenumber_b=`cat "$instance_alias_dir_b/phonenumbers.json" | jq -r "select(.PhoneNumber == \"$res_dest\") | { Id }" | jq -r ".Id"`
+        if [ "$phonenumber_a" != "" -a "$phonenumber_b" != "" ]; then
+            ##
+            echo "s%$phonenumber_a%$phonenumber_b%g" >> $helper_sed
+            echo "s%$res_src%$res_dest%g" >> $helper_sed
+            echo "flowExceptions2" > $TEMPFILE1
+        else
+            echo "flowExceptions1" > $TEMPFILE1
+            skipPhonemapping=1
+            echo $skipPhonemapping > $TEMPFILE2
+            error "Source phone number - $res_src, or destination phone number - $res_dest does not exist in respective instance, please check the number configured in resourceMap"
+        fi
+	fi
+    #### End of "phonenumber"
    done
 fi
 
@@ -365,6 +401,22 @@ lambda_arn_prefix_a="arn:aws:lambda:$region_a:$aws_ac_a:function:$lambda_prefix_
 lambda_arn_prefix_b="arn:aws:lambda:$region_b:$aws_ac_b:function:$lambda_prefix_b"
 if [ "$lambda_arn_prefix_a" != "$lambda_arn_prefix_b" ]; then
     echo "s%$lambda_arn_prefix_a%$lambda_arn_prefix_b%g" >> $helper_sed
+fi
+
+## Set the flowExceptions file name that will be used in "copy" script
+## If phone mapping was configured and we had an error then exit here
+skipPhonemapping=`cat $TEMPFILE2`
+if [ "$skipPhonemapping" = "1" ];then
+    exit 1
+fi
+
+flowExceptionToUse=`cat $TEMPFILE1`
+if [ "$flowExceptionToUse" = "flowExceptions1" ]; then
+    ## We use flowException file that will skip flows with hard-coded caller Id settings
+    echo "flowExceptions=\"$flowExceptions1\"" | tee -a $helper_var
+else
+    ## We use flowException file that will not skip flows with hard-coded caller Id settings as we are doing phone mapping
+    echo "flowExceptions=\"$flowExceptions2\"" | tee -a $helper_var
 fi
 
 echo

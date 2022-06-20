@@ -159,7 +159,9 @@ rscdir="${homedir}/resources"
 
 ## Added flow exception file to skip flows that cannot be migrated. e.g. Can contain caller-id setting of claimed number from source account
 ## e.g. lambda src-function-name dest-function-name
+## Setting default flow execptions file - if phone mapping was configured then helper.var will override variable with "flowExceptions_phone"
 flowExceptions="${rscdir}/flowExceptions"
+phoneMapping="${rscdir}/flowExceptions_phone"
 
 actionLead="# Action -"
 dryrun=
@@ -600,32 +602,60 @@ EOD
     fi
 fi
 
-## Load helper_old so that we can check if queues in destination instance need manual updates
-## e.g. for outbound number configuration
+## Load helper_old so that we can check if queues in destination instance need update of hours of operation
 egrep "^queue_" "$helper_old" > $TEMPOLD
 if [ ! -s $TEMPOLD ]; then
     echo "No queues to update"
 else
     num_queues=$(echo $(cat $TEMPOLD | wc -l))
-    echo -e "\nChecking $num_queues queues for an update"
+    echo -e "\nChecking $num_queues queues for hours of operations update"
     ii=0
     sort $TEMPOLD |
     while read queue_json; do
         ii=$[ii+1]
         echo -n "$ii. $queue_json ... "
- #       cat "$instance_alias_dir_a/$queue_json" |
- #       jq "del(.Queue.OutboundCallerConfig)" > $TEMPA
+        queue_name=${queue_json#queue_}
+        queue_name=${queue_name%.json}
+        queue_name_decoded=$(path_decode "$queue_name")
 
-	## We need to compare to make sure any outbound number configuration is also flagged, so leave it in (Commented above two lines)
-        cat "$instance_alias_dir_a/$queue_json" > $TEMPA
-        cat "$instance_alias_dir_b/$queue_json" > $TEMPB
+        hours_of_operations_id_a=$(jq -r ".Queue.HoursOfOperationId" "$instance_alias_dir_a/$queue_json" | dos2unix)
+        hours_of_operations_id_b=$(jq -r ".Queue.HoursOfOperationId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        echo $hours_of_operations_id_a > $TEMPA
+        echo $hours_of_operations_id_b > $TEMPB
         df=$(diff_files); echo $df; test "$df" == "same" && continue
-        echo "Skipping this update. May contain outbound number configuration. Please update $queue_json manually considering potential operation impact."
-## Lets record that we skipped this update
-	echo "$queue_json|dummyId" >> $helper_skip
+
+        ## We have to update Queue hours of operations
+    	queue_id_b=$(jq -r ".Queue.QueueId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        echo '{
+                "InstanceId": ''"'$instance_id_b'",
+                "QueueId" : ''"'$queue_id_b'",
+                "HoursOfOperationId": ''"'$hours_of_operations_id_a'"
+            }' | sed -f "$helper_sed" > "$helper/queue_hours_$queue_name.json"
+
+        cat <<EOD >> "$helper_log"
+
+        $actionLead Update Queue hours of operations: $queue_name_decoded
+EOD
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-update Queue hours of operation
+$(cat "$helper/queue_hours_$queue_name.json")
+
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect update-queue-hours-of-operation \
+--cli-input-json "file://$helper/queue_hours_$queue_name.json" \
+> "$helper/output_queue_hours_$queue_name.json"
+EOD
+            continue
+        fi
+
+        aws_connect update-queue-hours-of-operation \
+            --cli-input-json "file://$helper/queue_hours_$queue_name.json" \
+            > "$helper/output_queue_hours_$queue_name.json" || error $LINENO
+
     done
 fi
-
 
 ############################################################
 #
@@ -1634,15 +1664,159 @@ if [ ! -s $TEMPOLD ]; then
 	ii=0
 	sort $TEMPOLD |
 	while read qc_json; do
-        	ii=$[ii+1]
-	        echo -n "$ii. $qc_json ... "
-		cat "$instance_alias_dir_a/$qc_json" > $TEMPA
-		cat "$instance_alias_dir_b/$qc_json" > $TEMPB
+        ii=$[ii+1]
+	    echo -n "$ii. $qc_json ... "
+        qc_config_json="quickconnect_config_"${qc_json#quickconnect_}
+        qc_name_json="quickconnect_name_"${qc_json#quickconnect_}
+
+        ## See if there is any update required in destination quick connect
+
+        ## Let's see if we have to update quick connect configuration
+        cat "$instance_alias_dir_a/$qc_json" |  jq ".QuickConnect | del(.QuickConnectARN, .Name, .Description, .Tags)" > $TEMPA
+        cat "$instance_alias_dir_b/$qc_json" |  jq ".QuickConnect | del(.QuickConnectARN, .Name, .Description, .Tags)" > $TEMPB
 		df=$(diff_files); echo $df; test "$df" == "same" && continue
-		echo "Please update $qc_json manually considering potential operation impact."
-		## Lets record that we skipped this update
-		echo "$qc_json|dummyId" >> $helper_skip
+        ## we have to update the quick connect configuration
+        ### Check if this is part of exception that we have to skip (e.g. quick connect is of type USER)
+   	    cnt=`grep -f $flowExceptions "$instance_alias_dir_a/$qc_json" | wc -l`
+   	    if [ $cnt -gt 0 ]; then
+           	echo "Skipping this update - Quick connect type is USER. Please update this quick connect manually in destination instance"
+        	echo "$qc_json|dummyid" >> $helper_skip
+            continue
+        fi
+        cat $TEMPA | jq --arg iid $instance_id_b ". + { InstanceId: \$iid }" | sed -f "$helper_sed" > "$helper/$qc_config_json"
+  		if [ -n "$dryrun" ]; then
+    		cat <<EOD
+Dry-update quick connect configuration
+$(cat "$helper/$qc_config_json")
+EOD
+       		cat <<EOD >> "$helper_log"
+aws connect update-quick-connect-config \
+--cli-input-json "file://$helper/$qc_config_json" \
+> "$helper/output_$qc_config_json"
+EOD
+            continue
+        fi
+
+        ## Not a dry-run update quick connect configuration
+   	    aws_connect update-quick-connect-config \
+                --cli-input-json "file://$helper/$qc_config_json" \
+                > "$helper/output_$qc_config_json" || error $LINENO
+
 	done
+    test $? -eq 0 || error
+fi
+
+############################################################
+#
+# Update Queue - Outbound Config
+#   If we have phone mapping then we will update phone number from instance b
+#   else we will only update outbound whisper flow in the queue
+#
+#
+cat <<EOD
+
+Queues - Outbound caller configuration
+------
+EOD
+
+# Preload as $helper_old may change
+egrep "^queue_" "$helper_old" > $TEMPOLD
+if [ ! -s $TEMPOLD ]; then
+    echo "No queues to update for outbound caller configuration"
+else
+    num_queues=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_queues queues for outbound caller configuration"
+    ii=0
+    sort $TEMPOLD |
+    while read queue_json; do
+        outboundconfig=n
+        ii=$[ii+1]
+        queue_outboundcaller_json="queue_outboundcaller_"${queue_json#queue_}
+        echo -n "$ii. $queue_outboundcaller_json ... "
+        ## Let's extract outbound caller Id number Id and whisper flow Id - These will be used to ensure target is updated correctly
+        ## We need to take care of many variations here
+        ### e.g. Both, caller Id and whisper flow id exists in source but not in destination
+        #######  only caller Id exists in source but not in destination
+        #######  only whisper id exists in source but not in destination
+        #######  And vice-a versa like caller Id and whisper flow id does not exist in source but exist in destination (it was deleted in source after initial sync to destination)
+        ######   caller Id exists in source but whisper id exists in dest; whisper Id exists in source but caller id in dest and so forth.....
+
+        outboundCallerId_a=$(jq -r ".Queue.OutboundCallerConfig.OutboundCallerIdNumberId" "$instance_alias_dir_a/$queue_json" | dos2unix)
+        outboundWhisperFlow_a=$(jq -r ".Queue.OutboundCallerConfig.OutboundFlowId" "$instance_alias_dir_a/$queue_json" | dos2unix)
+        outboundWhisperFlow_b=$(jq -r ".Queue.OutboundCallerConfig.OutboundFlowId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        outboundCallerId_b=$(jq -r ".Queue.OutboundCallerConfig.OutboundCallerIdNumberId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        ## If we have phone mapping then leave the outbound caller Id number Id in it else remove it
+        if [ "$flowExceptions" = "$phoneMapping" ]; then
+            ## we have phone mapping, so leave the outbound caller Id number Id
+            cat "$instance_alias_dir_a/$queue_json" | jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags)" > $TEMPA
+            cat "$instance_alias_dir_b/$queue_json" | jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags)" > $TEMPB
+            df=$(diff_files); echo $df; test "$df" == "same" && continue
+
+            ## There is some difference between source queue and destination queue for outbound configuration
+            outboundconfig=y
+            ## Let's check if we had data for outbound caller Id number Id and whisper flow Id from the queue of source instance
+            if [ "$outboundCallerId_a" = "null" -a "$outboundWhisperFlow_a" = "null" ]; then
+                ## This can happen if both, caller Id and whisper flow, are deleted from the queue of source instance - we will have to remove it from dest instance
+                cat $TEMPA | jq '. + { "OutboundCallerConfig": {} }' > $TEMPB
+                cat $TEMPB > $TEMPA
+            fi
+        else
+            ## we do not have phone mapping, so remove the outbound caller Id number Id (only caller Id name and outbound whisper flow Id will be updated)
+            ## But first lets' check if we have outbound caller Id number Id - if it exists we have to note this as manual update
+            if [ "$outboundCallerId_a" != "null" ]; then
+                ## phone mapping is not configured and queue contains outbound caller id number - so this will be a manual update for outbound caller id number
+                echo "Queue contains outbound caller id number...you may have to update corresponding outbound caller id number manually in destination queue"
+                echo "$queue_json|queue_outboundcaller" >> $helper_skip
+            fi
+
+            if [ "$outboundCallerId_a" = "null" -a "$outboundCallerId_b" != "null" ]; then
+                echo "Outbound caller Id was removed from source queue...you may have to remove corresponding outbound caller id number manually in destination queue"
+                echo "$queue_json|queue_outboundcaller" >> $helper_skip
+            fi
+
+            ## If whisper flow is different in source/destination then We will still update the outbound whisper flow Id in destination but remove outbound caller id number id
+            cat "$instance_alias_dir_a/$queue_json" | 
+            jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags, .OutboundCallerConfig.OutboundCallerIdNumberId)" > $TEMPA
+            cat "$instance_alias_dir_b/$queue_json" | 
+            jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags, .OutboundCallerConfig.OutboundCallerIdNumberId)" > $TEMPB
+            df=$(diff_files); echo $df; test "$df" == "same" && continue
+            if [ "$outboundWhisperFlow_a" = "null" -a "$outboundWhisperFlow_b" = "null" ]; then
+                continue
+            fi
+
+            ## There is some difference between source queue and destination queue for outbound configuration
+            outboundconfig=y
+            ## We have to update dest instance, but first lets' check if we have outbound whisper flow configured in this queue in source instance
+            ## This can happen if outbound whisper flow was deleted from the queue of source instance - we will have to remove it from dest instance
+            if [ "$outboundWhisperFlow_a" = "null" ]; then
+                cat $TEMPA | jq '. + { "OutboundCallerConfig": {} }' > $TEMPB
+                cat $TEMPB > $TEMPA
+            fi
+        fi
+
+        ## If we don't have any update then continue
+        test "$outboundconfig" == "n" && continue
+
+	    ## We need to update outbound caller configuration and/or outbound whisper flow to this queue
+        cat "$TEMPA" | jq --arg instance_id $instance_id_b ". + { InstanceId: \$instance_id}" | sed -f "$helper_sed" > "$helper/$queue_outboundcaller_json"
+
+		if [ -n "$dryrun" ]; then
+			cat <<EOD
+			Dry-update Queue outbound configuration
+			$(cat "$helper/$queue_outboundcaller_json")
+EOD
+            		cat <<EOD >> "$helper_log"
+aws connect update-queue-outbound-caller-config \
+--cli-input-json "file://$helper/$queue_outboundcaller_json" \
+> "$helper/output_$queue_outboundcaller_json"
+EOD
+            continue
+		fi
+
+	    aws_connect update-queue-outbound-caller-config \
+            --cli-input-json "file://$helper/$queue_outboundcaller_json" \
+            > "$helper/output_$queue_hours_json" || error $LINENO
+    done
 fi
 
 ############################################################
@@ -1673,23 +1847,34 @@ else
         cat "$instance_alias_dir_b/$queue_qc_json" > $TEMPB
         df=$(diff_files); echo $df; test "$df" == "same" && continue
 
-	if [ -z "$dryrun" ]; then
 		## We need to associate quick connect to this queue
 		queue_id_b=$(jq -r ".Queue.QueueId" "$instance_alias_dir_b/$queue_json" | dos2unix)
 	        cat "$instance_alias_dir_a/$queue_qc_json" | sed -f "$helper_sed" > "$helper/$queue_qc_json"
 		## Associate all quick connects to this queue but skip the quick connect type USER
 		cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType != \"USER\") | .Id" | dos2unix |
 		while read qcid; do
-			aws_connect associate-queue-quick-connects \
-				--instance-id $instance_id_b --queue-id $queue_id_b --quick-connect-ids $qcid \
-				> $TEMPFILE || error $LINENO
+        	if [ -z "$dryrun" ]; then
+		    	aws_connect associate-queue-quick-connects \
+			    	--instance-id $instance_id_b --queue-id $queue_id_b --quick-connect-ids $qcid \
+				    > $TEMPFILE || error $LINENO
+        		cnt=`cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType == \"USER\") | .Id" | dos2unix | wc -l`
+        		if [ "$cnt" -gt "0" ]; then
+        			## There is a quick connect in this queue of type USER - Mark it to update this queue manually
+		        	echo "$queue_qc_json|qQC" >> $helper_skip
+        		fi
+            else
+    			cat <<EOD
+	    		Dry-create Queue quick connect configuration
+		    	$(cat "$helper/$queue_qc_json")
+EOD
+            cat <<EOD >> "$helper_log"
+aws_connect associate-queue-quick-connects \
+--instance-id $instance_id_b --queue-id $queue_id_b --quick-connect-ids $qcid \
+> "$helper/output_$queue_hours_json"
+EOD
+                continue
+            fi
 		done
-		cnt=`cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType == \"USER\") | .Id" | dos2unix | wc -l`
-		if [ "$cnt" -gt "0" ]; then
-			## There is a quick connect in this queue of type USER - Mark it to update this queue manually
-			echo "$queue_qc_json|qQC" >> $helper_skip
-		fi
-	fi
     done
 fi
 
@@ -1697,6 +1882,11 @@ fi
 ###########################################################################################################
 ### Let's check if we skipped to update any resources
 ## Check if we skipped routing profile update
+cat <<EOD >> "$helper_log"
+******************* Possible actions in destination instance *******************
+******************* Please check these resources in destination instance *******************
+EOD
+
 echo
 echo
 echo
@@ -1728,6 +1918,9 @@ for resource in hour queue routing module flow quickconnect; do
         egrep "^${resource}_" "$helper_skip" > $TEMPNEW
         if [ -s $TEMPNEW ]; then
             num_hours=$(echo $(cat $TEMPNEW | wc -l))
+cat <<EOD >> "$helper_log"
+            Skipped $num_hours "$rsc_desc" for create/update
+EOD
             echo -e "\nSkipped $num_hours "$rsc_desc" for create/update"
             ii=0
             sort $TEMPNEW |
@@ -1739,13 +1932,22 @@ for resource in hour queue routing module flow quickconnect; do
                 resource_name=${resource_name%.json}
 		if [ "$resource_id" == "qQC" ]; then
 	                resource_name=${resource_name#qc_}
+cat <<EOD >> "$helper_log"
+	                $ii. Quick connects in queue: $resource_name
+EOD
 	                echo "$ii. Quick connects in queue: $resource_name"
 		else
+cat <<EOD >> "$helper_log"
+	                $ii. $resource_name
+EOD
 	                echo "$ii. $resource_name"
 		fi
             done
         fi
 done
+cat <<EOD >> "$helper_log"
+*********************************************
+EOD
 echo "*********************************************"
 
 ##############################################
@@ -1762,8 +1964,9 @@ else
     if [ -n "$dryrun" ]; then
         echo "No actions were carried out in Dry-run mode"
     else
+cat <<EOD >> "$helper_log"
+        All done
+EOD
         echo "All done"
     fi
 fi
-
-

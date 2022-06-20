@@ -475,6 +475,24 @@ done
 test $? -eq 0 || error
 
 
+############################################################
+#
+# Phone numbers
+#
+aws_connect list-phone-numbers \
+	--instance-id $instance_id \
+	--max-items $maxitems \
+	> $TEMPFILE || error $LINENO
 
+cat $TEMPFILE |
+	jq -r ".PhoneNumberSummaryList[]$jq_prefix_filter" |
+	tee "$instance_alias_dir/phonenumbers.json" |
+
+echo -e "\n$(jq -s "length") phone numbers listed in \"$instance_alias_dir/phonenumbers.json\"$jq_prefix_filter_text"
+
+test $? -eq 0 || error
+
+
+############################################################
 echo
 echo "All done"

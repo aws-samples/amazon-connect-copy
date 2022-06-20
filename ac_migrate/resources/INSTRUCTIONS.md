@@ -34,7 +34,7 @@ Following are the bash scripts that are used for the migration of the Amazon Con
 
 2. Folder: ac_migrate/resources: This folder contains following resource files referenced in bash scripts.
 
-	a.	resourceMap: This file contains the mapping of Lambda function and Lex Bot from the source instance and destination instance.
+	a.	resourceMap: This file contains the mapping of Lambda function, Lex Bot and phone numbers from the source instance and destination instance.
 
 		E.g. 1. If Lambda function in the source instance is called “functionname-src-a” and corresponding Lambda function in the destination instance is called “functionname-dest-b”, then the file should have following entry:
 		lambda    functionname-src-a    functionname-dest-a
@@ -45,7 +45,13 @@ Following are the bash scripts that are used for the migration of the Amazon Con
 		E.g. 3. If Lex bot name (v2) in the source instance is called “lexbot-src-a:Aliasname-a” and corresponding bot in the destination instance is called “lexbot-dest-b:Aliasname-b”, then the file should have following entry:
 		bot lexbot-src-a:Aliasname-a   lexbot-dest-b:Aliasname-b
 
-	b.	flowExceptions: **** DO NOT UPDATE THIS FILE ****. This file contains collection of the search strings that are used to find the flow exceptions. If a search string is found in a flow JSON then that flow is not updated. The examples of such flows are an “Outbound whisper flow” where an instance’s claimed number is used to set as caller Id, or “Transfer to queue flow” where an instance’s claimed number is used to set as caller Id. Other examples are where a hard-coded Agent ARN is configured in a flow. A manual update is required for such flows.
+		E.g. 4. Phone number mapping is configured as follows:
+		phonenumber  +<country-code><src-number>		+<country-code><dest-number>
+			e.g. phonenumber   +14125551111 	+15126662222
+
+	b.	flowExceptions and flowExceptions_phone: **** DO NOT UPDATE THIS FILE ****. 
+		This file contains collection of the search strings that are used to find the flow exceptions. If a search string is found in a flow JSON then that flow is not updated. The examples of such flows are an “Outbound whisper flow” where an instance’s claimed number is used to set as caller Id, or “Transfer to queue flow” where an instance’s claimed number is used to set as caller Id. Other examples are where a hard-coded Agent ARN is configured in a flow. A manual update is required for such flows.
+		If phone mapping is configured in resourceMap then it uses "flowExceptions_phone" file where flows with hard-coded caller-id settings are not skipped
 
 
 Prerequisites:
@@ -78,9 +84,15 @@ c. Open file “resourceMap” and add the resource-type, name-in-source-account
 	lambda    source-function-name-b     dest-function-name-b 
 	bot    	source-bot-name-a   			dest-bot-name-a
 	bot		source-bot-name:bot-alias-name	dest-bot-name:bot-alias-name
+	phonenumber		<source-instance-phonenumber-a>		<dest-instance-phone-number-a>
+	phonenumber		<source-instance-phonenumber-b>		<dest-instance-phone-number-b>
+
+	****** Phone mapping instructions *******
+	Please note that leading '+' sign is needed for phonenumber mapping (e.g. +14125551111). You need to configure all phone numbers from source instance. Multiple source instance's phone numbers can be mapped to same phone number from destination instance (but not vice-a-versa). e.g. if you have two phone numbers in source but only one in destination, then it can be configured as follows:
+		phonenumber +14125551111 	+15125551111
+		phonenumber +14125552222 	+15125551111
 
 Scripts Usage:
-
 ---------------
 
 ac_save -s  source-instance-alias-name    src-profile-name (DO NOT use option "-G <flows-to-skip>" with "ac_save" script)
