@@ -1,0 +1,561 @@
+
+#!/bin/bash
+
+############################################################
+#
+# Find the differences of instance A and instance B and produce helper files.
+# Note: This script does not use AWS CLI but instead uses results from
+#   connect_save on instance A and B.
+#
+# Added support to use mapping file for Lambda and Lex
+# This is useful when Lambda function name in destination account is different then in source account
+# 
+#
+
+VERSION=1.2.2b
+SCRIPT_VERSION="$(basename $0) $VERSION"
+
+USAGE=$(cat <<EOD
+Usage: $(basename $0) [-?fev] [-l lambda_prefix_a=lambda_prefix_b] [-b lex_bot_prefix_a=lex_bot_prefix_b] instance_alias_a instance_alias_b helper
+    Based on connect_save result on Amazon Connect instance A and B,
+    find the differences and produce helper files to safely copy components from A to B.
+
+    instance_alias_a    Alias of the Connect instance A
+    instance_alias_b    Alias of the Connect instance B
+                        (Aliases can be a path to the directory where the instance was saved using connect_save.)
+    helper              Name of the helper directory
+    -f                  Force removal of existing helper directory
+    -e                  Proceed even when the system may not encode Extended ASCII characters properly
+    -v                  Show version of this script
+    -l lambda_prefix_a=lambda_prefix_b
+                        Lambda function name prefixes for instances A and B (if different) to be replaced during copying
+    -b lex_bot_prefix_a=lex_bot_prefix_b
+                        Lex bot (Classic) name prefixes for instances A and B (if different) to be replaced during copying
+    -?                  Help
+
+    Note: This script create files in the helper directory without changing any instance component files.
+EOD
+)
+usage() { echo -e "$USAGE" >&2; exit 2; }
+version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
+
+error() { echo -e "Error: $1" >&2; exit 1; }
+
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
+# hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+
+path_encode()  {
+    old_lc_collate=$LC_COLLATE
+    LC_COLLATE=C
+    local length="${#1}"
+    for (( i = 0; i < length; i++ )); do
+        local c="${1:$i:1}"
+        case $c in
+            [a-zA-Z0-9.~_-]) printf '%s' "$c";;
+            *) x=$(hex_code "$c"); echo -n ${x//%0D/};;
+        esac
+    done
+    LC_COLLATE=$old_lc_collate
+}
+
+add_file() {
+    alias_dir="$1"
+    file_suffix="$2"
+    helper_file="$3"
+    if [ ! -s "$alias_dir/$file_suffix" ]; then
+        error "File missing or empty: $alias_dir/$file_suffix"
+        exit 1
+    else
+        echo "$file_suffix" >> $helper_file
+    fi
+}
+
+###########################################################################################################
+## Evaluate what resources exist in source instance and what in destination, and create old and new helper files
+##
+eval_resources() {
+   restype="$1"
+   resource="$2"
+   resfile="$3"
+   rp_to_ignore="$4"
+   rpq="$5"
+   
+   jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a"/"$resfile" |
+   dos2unix |
+   while read resource_id_a resource_name_a; do
+      if [ "$resource_name_a" == "$rp_to_ignore" ]; then
+        continue
+      fi
+      resource_name_encoded_a=$(path_encode "$resource_name_a")
+##      resource_id_b=$(jq -r "select(.Name == \"$resource_name_a\") | .Id" "$instance_alias_dir_b"/"$resfile")
+##      resource_id_b=$(jq -r "select(.Name == \"${resource_name_a//\"/\\\"}\") | .Id" "$instance_alias_dir_b"/"$resfile")
+      resource_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b"/"$resfile" | jq -r "select(.Name == \"${resource_name_a//\"/%22}\") | .Id" | dos2unix)
+      if [ -z "$resource_id_b" ]; then
+	## Resource does not exist in destination - let's do case insensitive check to make sure with regex (^ and $ for exact match)
+	resource_id_b=$(jq -r -c "select(.Name | match(\"^$resource_name_a$\";\"i\")) |  .Id" "$instance_alias_dir_b"/"$resfile" | dos2unix)
+  	if [ -z "$resource_id_b" ]; then
+		## Resource does not exist in destination
+        	add_file "$instance_alias_dir_a" "${resource}${resource_name_encoded_a}.json" $helper_new
+		## If resource is routing profile then we need to also account for queues configuration in routing profile
+		if [ "$restype" = "RP" ]; then
+		   add_file "$instance_alias_dir_a" "${rpq}${resource_name_encoded_a}.json" $helper_new
+		fi
+        else
+		## Resource exists in destination but name in source and destination have some lower-upper case differences
+		## Get the destination resource name and rename it to same name as source instance name
+		resource_name_b=$(jq -r "select(.Id == \"$resource_id_b\") | .Name" "$instance_alias_dir_b"/"$resfile")
+	        resource_name_encoded_b=$(path_encode "$resource_name_b")
+		mv "$instance_alias_dir_b"/"${resource}${resource_name_encoded_b}.json" "$instance_alias_dir_b"/"${resource}${resource_name_encoded_a}.json"
+        	add_file "$instance_alias_dir_b" "${resource}${resource_name_encoded_a}.json" $helper_old
+		## If resource is routing profile then we need to also account for queues configuration in routing profile
+		if [ "$restype" = "Queues" ]; then
+		   ## if there is a case difference then set the name of queue quick connect same as source instance case
+		   mv "$instance_alias_dir_b"/"${rpq}${resource_name_encoded_b}.json" "$instance_alias_dir_b"/"${rpq}${resource_name_encoded_a}.json"
+		fi
+		if [ "$restype" = "RP" ]; then
+		   ## if there is a case difference then set the name of queue config in routing profile same as source instance case
+		   mv "$instance_alias_dir_b"/"${rpq}${resource_name_encoded_b}.json" "$instance_alias_dir_b"/"${rpq}${resource_name_encoded_a}.json"
+  		   add_file "$instance_alias_dir_b" "${rpq}${resource_name_encoded_a}.json" $helper_old
+		fi
+        	cat <<EOD >> $helper_sed
+# Add Ids in sed file for replacement
+s%$resource_id_a%$resource_id_b%g
+EOD
+       fi
+    else
+	## Resource exists in destination
+        add_file "$instance_alias_dir_b" "${resource}${resource_name_encoded_a}.json" $helper_old
+	## If resource is routing profile then we need to also account for queues configuration in routing profile
+	if [ "$restype" = "RP" ]; then
+	   add_file "$instance_alias_dir_b" "${rpq}${resource_name_encoded_a}.json" $helper_old
+	fi
+        cat <<EOD >> $helper_sed
+# Add Ids in sed file for replacement
+s%$resource_id_a%$resource_id_b%g
+EOD
+    fi
+   done
+   test $? -eq 0 || error
+##
+} ## End of eval_resources
+###########################################################################################################
+
+forced=
+ignore_improper_extended_ascii=
+lambda_prefix_a=
+lambda_prefix_b=
+lex_bot_prefix_a=
+lex_bot_prefix_b=
+while getopts "?fevl:b:" arg; do
+    case "$arg" in
+    f)  forced=on;;
+    e)  ignore_improper_extended_ascii=on;;
+    v)  version;;
+    l)  lambda_prefix_a=${OPTARG%%=*}
+        lambda_prefix_b=${OPTARG#*=}
+        ;;
+    b)  lex_bot_prefix_a=${OPTARG%%=*}
+        lex_bot_prefix_b=${OPTARG#*=}
+        ;;
+    *)  usage;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ "$(hex_code "é")" != "%C3%A9" ]; then
+    echo "WARNING: This system may not encode Extended ASCII characters properly." >&2
+    if [ -n "$ignore_improper_extended_ascii" ]; then
+        echo "Proceed regardless as the -e option is specified." >&2
+    else
+        cat <<EOD >&2
+
+If your instance component names contain Extended ASCII characters, such as accented letters
+like é, this system will encode those names differently from standard encoding.
+
+If you are sure that your component names do not contain Extended ASCII characters,
+you may proceed regardless by running the command again with the -e option.
+EOD
+        exit 1
+    fi
+fi
+TEMPFILE1=$(mktemp)
+TEMPFILE2="$TEMPFILE1"_2
+trap 'rm -r -- $TEMPFILE1 $TEMPFILE2' EXIT
+touch $TEMPFILE1 $TEMPFILE2
+
+instance_alias_dir_a=$1
+instance_alias_a=$(basename "$instance_alias_dir_a")
+instance_alias_dir_b=$2
+instance_alias_b=$(basename "$instance_alias_dir_b")
+# helper=${3:-${instance_alias_a}_TO_${instance_alias_b}}
+helper=$3
+
+# Backward compatibility - if they are set, ignore the arguments
+lambda_prefix_a=${lambda_prefix_a:-$4}
+lambda_prefix_b=${lambda_prefix_b:-$5}
+
+## Set directories
+homedir=`pwd`
+rscdir="${homedir}/resources"
+## There are two flow Exceptions file - if we have phone mapping configured then we won't skip flows with hard-coded outbound caller Id set
+## else we have to skip those flows. We will set which flow Execption file to use based phone mapping
+flowExceptions1="${rscdir}/flowExceptions"
+flowExceptions2="${rscdir}/flowExceptions_phone"
+
+## Added resource name mapping to be replaced from src to dest account
+## e.g. lambda src-function-name dest-function-name
+resource_map="${rscdir}/resourceMap"
+
+if [ -z "$instance_alias_a" -o -z "$instance_alias_b" -o -z "$helper" ]; then
+    usage
+fi
+
+if [ -d $helper ]; then
+    if [ -n "$forced" ]; then
+        echo "Existing Helper directory forcefully removed: $helper"
+        rm -fr $helper
+    else
+        error "Helper directory already exists. Remove and try again (or use -f): $helper"
+    fi
+fi
+
+routing_profile_to_ignore="Basic Routing Profile"
+flow_template=$helper/flow_template.json
+
+cat <<EOD
+Instance Alias A: $instance_alias_a (in directory "$instance_alias_dir_a")
+Instance Alias B: $instance_alias_b (in directory "$instance_alias_dir_b")
+Helper: $helper
+EOD
+
+errorMsg=
+if [ ! -d "$instance_alias_dir_a" ]; then
+    errorMsg="$errorMsg \"$instance_alias_dir_a\""
+fi
+if [ ! -d "$instance_alias_dir_b" ]; then
+    errorMsg="$errorMsg \"$instance_alias_dir_b\""
+fi
+if [ -n "$errorMsg" ]; then
+    errorMsg="Cannot find instance directories:$errorMsg"
+    error "$errorMsg"
+fi
+
+mkdir -p $helper
+
+for ext in var sed new old; do
+    eval helper_$ext=$helper/helper.$ext
+    eval fn=\$helper_$ext
+    > $fn
+done
+
+
+############################################################
+#
+# Instance
+#
+
+echo "instance_alias_a=\"$instance_alias_a\"" | tee -a $helper_var
+echo "instance_alias_dir_a=\"$instance_alias_dir_a\"" | tee -a $helper_var
+echo "instance_alias_b=\"$instance_alias_b\"" | tee -a $helper_var
+echo "instance_alias_dir_b=\"$instance_alias_dir_b\"" | tee -a $helper_var
+
+. "$instance_alias_dir_a/instance.var"
+
+instance_id_a=$instance_Id
+instance_arn_a=$instance_Arn
+eval $(echo $instance_arn_a | (IFS=: read x x x r a x; echo "region_a=$r; aws_ac_a=$a"))
+region_a=$region_a
+aws_ac_a=$aws_ac_a
+aws_profile_a=$aws_Profile
+echo "instance_id_a=\"$instance_id_a\"" | tee -a $helper_var
+echo "instance_arn_a=\"$instance_arn_a\"" | tee -a $helper_var
+echo "region_a=\"$region_a\"" | tee -a $helper_var
+echo "aws_ac_a=\"$aws_ac_a\"" | tee -a $helper_var
+echo "aws_profile_a=\"$aws_Profile\"" | tee -a $helper_var
+echo "lambda_prefix_a=\"$lambda_prefix_a\"" | tee -a $helper_var
+echo "lex_bot_prefix_a=\"$lex_bot_prefix_a\"" | tee -a $helper_var
+
+. "$instance_alias_dir_b/instance.var"
+instance_id_b=$instance_Id
+instance_arn_b=$instance_Arn
+eval $(echo $instance_arn_b | (IFS=: read x x x r a x; echo "region_b=$r; aws_ac_b=$a"))
+region_b=$region_b
+aws_ac_b=$aws_ac_b
+aws_profile_b=$aws_Profile
+echo "instance_id_b=\"$instance_id_b\"" | tee -a $helper_var
+echo "instance_arn_b=\"$instance_arn_b\"" | tee -a $helper_var
+echo "region_b=\"$region_b\"" | tee -a $helper_var
+echo "aws_ac_b=\"$aws_ac_b\"" | tee -a $helper_var
+echo "aws_profile_b=\"$aws_Profile\"" | tee -a $helper_var
+echo "lambda_prefix_b=\"$lambda_prefix_b\"" | tee -a $helper_var
+echo "lex_bot_prefix_b=\"$lex_bot_prefix_b\"" | tee -a $helper_var
+
+# Use Instance B contact flow prefix
+echo "contact_flow_prefix=\"$instance_contact_flow_prefix\"" | tee -a $helper_var
+
+
+############################################################
+#
+# General SED commands
+#
+
+connect_arn_prefix_a="arn:aws:connect:$region_a:$aws_ac_a"
+connect_arn_prefix_b="arn:aws:connect:$region_b:$aws_ac_b"
+cat <<EOD >> $helper_sed
+# General SED commands
+s%$instance_id_a%$instance_id_b%g
+s%$connect_arn_prefix_a%$connect_arn_prefix_b%g
+EOD
+
+### Read resource mapping file and add the sed commands
+## By default we will use flowException file#1 that will skip migrating flows with hard-coded phone numbers
+## If we have phone mapping configured in resourceMap file then we will use flowException file#2
+echo "flowExceptions1" > $TEMPFILE1
+skipPhonemapping=0
+echo $skipPhonemapping > $TEMPFILE2
+if [ -e "$resource_map" ]; then
+   echo "Reading resource mapping to set up Lambda, Lex bots, and Phone numbers..."
+   cat $resource_map | 
+   while read res_type res_src res_dest; do
+    #### check if this is "lambda"
+	if [ "$res_type" = "lambda" ]; then
+		lambda_arn_prefix_a="arn:aws:lambda:$region_a:$aws_ac_a:function:$res_src"
+		lambda_arn_prefix_b="arn:aws:lambda:$region_b:$aws_ac_b:function:$res_dest"
+    		echo "s%$lambda_arn_prefix_a%$lambda_arn_prefix_b%g" >> $helper_sed
+	fi
+    #### End of "lambda"
+
+    #### check if this is "bot"
+	if [ "$res_type" = "bot" ]; then
+		## Check if this is bot type v2
+		bot_name=$res_src
+        cnt=`echo $bot_name | grep : | wc -l`
+        if [ "$cnt" == "1" ]; then
+            ## This is Lex V2 bot
+            botnameV2=`echo $bot_name | cut -f1 -d':'`
+            botaliasV2=`echo $bot_name | cut -f2 -d':'`
+			## Get bot-Id of this V2 bot
+			v2botid=`aws lexv2-models list-bots --profile $aws_profile_a | jq -r ".botSummaries[] | select(.botName == \"$botnameV2\") | { botId }" | jq -r ".botId"`
+			## now get alias-id using botid
+			v2aliasid=`aws lexv2-models list-bot-aliases --profile $aws_profile_a --bot-id $v2botid | jq -r ".botAliasSummaries[] | select(.botAliasName == \"$botaliasV2\") | { botAliasId }" | jq -r ".botAliasId"`
+			## Now create bot Alias arn
+			v2aliasarn_a=arn:aws:lex:$region_a:$aws_ac_a:bot-alias/$v2botid/$v2aliasid
+			bot_v2_a='"lexV2BotName":"'${botnameV2}'","lexV2BotAliasName":"'${botaliasV2}'"'
+
+			## now find arn of destination instance bot
+			bot_name=$res_dest
+            botnameV2=`echo $bot_name | cut -f1 -d':'`
+            botaliasV2=`echo $bot_name | cut -f2 -d':'`
+			## Get bot-Id of this V2 bot
+			v2botid=`aws lexv2-models list-bots --profile $aws_profile_b | jq -r ".botSummaries[] | select(.botName == \"$botnameV2\") | { botId }" | jq -r ".botId"`
+			## now get alias-id using botid
+			v2aliasid=`aws lexv2-models list-bot-aliases --profile $aws_profile_b --bot-id $v2botid | jq -r ".botAliasSummaries[] | select(.botAliasName == \"$botaliasV2\") | { botAliasId }" | jq -r ".botAliasId"`
+			## Now create bot Alias arn
+			v2aliasarn_b=arn:aws:lex:$region_b:$aws_ac_b:bot-alias/$v2botid/$v2aliasid
+			bot_v2_b='"lexV2BotName":"'${botnameV2}'","lexV2BotAliasName":"'${botaliasV2}'"'
+			echo "s%$bot_v2_a%$bot_v2_b%g" >> $helper_sed
+    		echo "s%$v2aliasarn_a%$v2aliasarn_b%g" >> $helper_sed
+		else
+			## This is v1 (Classic) bot
+			## Bot name and region replacement for v1 type of bot
+  	        bot_a='"LexBot":{"Name":"'${res_src}'","Region":"'${region_a}'"'
+           	bot_b='"LexBot":{"Name":"'${res_dest}'","Region":"'${region_b}'"'
+	 		echo "s%$bot_a%$bot_b%g" >> $helper_sed
+		fi
+       		echo "lex_$res_dest" >> $helper_new
+	fi
+    #### End of "bot"
+
+    #### check if this is "phonenumber"
+	if [ "$res_type" = "phonenumber" -a "$skipPhonemapping" -eq "0" ]; then
+        ## Let's retrieve phone number Id
+		phonenumber_a=`cat "$instance_alias_dir_a/phonenumbers.json" | jq -r "select(.PhoneNumber == \"$res_src\") | { Id }" | jq -r ".Id"`
+		phonenumber_b=`cat "$instance_alias_dir_b/phonenumbers.json" | jq -r "select(.PhoneNumber == \"$res_dest\") | { Id }" | jq -r ".Id"`
+        if [ "$phonenumber_a" != "" -a "$phonenumber_b" != "" ]; then
+            ##
+            echo "s%$phonenumber_a%$phonenumber_b%g" >> $helper_sed
+            echo "s%$res_src%$res_dest%g" >> $helper_sed
+            echo "flowExceptions2" > $TEMPFILE1
+        else
+            echo "flowExceptions1" > $TEMPFILE1
+            skipPhonemapping=1
+            echo $skipPhonemapping > $TEMPFILE2
+            error "Source phone number - $res_src, or destination phone number - $res_dest does not exist in respective instance, please check the number configured in resourceMap"
+        fi
+	fi
+    #### End of "phonenumber"
+   done
+fi
+
+lambda_arn_prefix_a="arn:aws:lambda:$region_a:$aws_ac_a:function:$lambda_prefix_a"
+lambda_arn_prefix_b="arn:aws:lambda:$region_b:$aws_ac_b:function:$lambda_prefix_b"
+if [ "$lambda_arn_prefix_a" != "$lambda_arn_prefix_b" ]; then
+    echo "s%$lambda_arn_prefix_a%$lambda_arn_prefix_b%g" >> $helper_sed
+fi
+
+## Set the flowExceptions file name that will be used in "copy" script
+## If phone mapping was configured and we had an error then exit here
+skipPhonemapping=`cat $TEMPFILE2`
+if [ "$skipPhonemapping" = "1" ];then
+    exit 1
+fi
+
+flowExceptionToUse=`cat $TEMPFILE1`
+if [ "$flowExceptionToUse" = "flowExceptions1" ]; then
+    ## We use flowException file that will skip flows with hard-coded caller Id settings
+    echo "flowExceptions=\"$flowExceptions1\"" | tee -a $helper_var
+else
+    ## We use flowException file that will not skip flows with hard-coded caller Id settings as we are doing phone mapping
+    echo "flowExceptions=\"$flowExceptions2\"" | tee -a $helper_var
+fi
+
+echo
+
+############################################################
+#
+# Prompts
+#
+
+echo Checking Prompts ...
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir_a/prompts.json" |
+dos2unix |
+while read prompt_id_a prompt_name; do
+    prompt_name_encoded=$(path_encode "$prompt_name")
+    # prompt_id_b=$(jq -r "select(.Name == \"${prompt_name//\"/\\\"}\") | .Id" "$instance_alias_dir_b/prompts.json")
+    prompt_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/prompts.json" | jq -r "select(.Name == \"${prompt_name//\"/%22}\") | .Id" | dos2unix)
+    if [ -z "$prompt_id_b" ]; then
+        echo "prompt_$prompt_name" >> $helper_new
+    else
+        echo "prompt_$prompt_name" >> $helper_old
+        cat <<EOD >> $helper_sed
+# Prompt: $prompt_name
+s%$prompt_id_a%$prompt_id_b%g
+EOD
+    fi
+done
+test $? -eq 0 || error
+
+
+############################################################
+#
+# Hours of operations
+#
+
+echo Checking Hours of operation ...
+restype="Hours"
+resource="hour_"
+resfile="hours.json"
+eval_resources "$restype" "$resource" "$resfile" "none" "none"
+
+
+############################################################
+#
+# Queues
+#
+
+echo Checking Queues ...
+restype="Queues"
+resource="queue_"
+resfile="queues.json"
+queue_qc="queue_qc_"
+eval_resources "$restype" "$resource" "$resfile" "none" "$queue_qc"
+
+
+############################################################
+#
+# Routing Profiles
+#
+
+echo Checking Routing Profiles ...
+restype="RP"
+resource="routing_"
+resfile="routings.json"
+routingQs="routingQs_"
+eval_resources "$restype" "$resource" "$resfile" "$routing_profile_to_ignore" "$routingQs"
+
+############################################################
+#
+# Contact Flow Modules
+#
+
+echo Checking Contact Flow Modules ...
+restype="FlowModule"
+resource="module_"
+resfile="modules.json"
+eval_resources "$restype" "$resource" "$resfile" "none" "none"
+
+############################################################
+#
+# Contact Flows
+#
+echo Checking Contact Flows ...
+restype="CF"
+resource="flow_"
+resfile="flows.json"
+eval_resources "$restype" "$resource" "$resfile" "none" "none"
+
+cat > $flow_template <<EOD
+{
+    "Version": "2019-10-30",
+    "StartAction": "e093fb75-2263-4594-875e-2d8e9974595f",
+    "Metadata": {
+        "entryPointPosition": {
+            "x": 20,
+            "y": 20
+        },
+        "snapToGrid": false,
+        "ActionMetadata": {
+            "e093fb75-2263-4594-875e-2d8e9974595f": {
+                "position": {
+                    "x": 223,
+                    "y": 76
+                }
+            }
+        }
+    },
+    "Actions": [
+        {
+            "Identifier": "e093fb75-2263-4594-875e-2d8e9974595f",
+            "Type": "DisconnectParticipant",
+            "Parameters": {},
+            "Transitions": {}
+        }
+    ]
+}
+EOD
+
+
+############################################################
+#
+# Quick Connects
+#
+
+echo Checking Quick Connects ...
+restype="QuickConnects"
+resource="quickconnect_"
+resfile="quickconnects.json"
+eval_resources "$restype" "$resource" "$resfile" "none" "none"
+
+
+########################################
+cat <<EOD
+
+These helper files are created:
+$helper_var: About the source and target Amazon Connect instances
+$helper_new: Components to add to "$instance_alias_dir_b"
+$helper_old: Components to update for "$instance_alias_dir_b" based on "$instance_alias_dir_a"
+$helper_sed: SED script used to update components
+$flow_template: Contact Flow template json
+
+All done
+EOD
