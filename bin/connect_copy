@@ -5,8 +5,11 @@
 # Copy Amazon Connect instance A to instance B safely
 #
 
-VERSION=1.1
+VERSION=1.2.2b
 SCRIPT_VERSION="$(basename $0) $VERSION"
+
+# Usage: $(basename $0) [-?deCv] helper
+#     -C      Produce compact contact flow/module JSON files (for the updated targetflows/modules)
 
 USAGE=$(cat <<EOD
 Usage: $(basename $0) [-?dev] helper
@@ -24,6 +27,7 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() {
     if [[ ! "$1" =~ ^[[:digit:]]+$ ]]; then
@@ -45,7 +49,17 @@ EOD
     exit 1
 }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
+# hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -85,7 +99,7 @@ sub_lex_bot() {
         cat
     else
         cat > $TEMP1
-        lexExists=$(cat $TEMP1 | jq ".Actions[] | select(.Type == \"ConnectParticipantWithLexBot\") | has(\"Type\")")
+        local lexExists=$(cat $TEMP1 | jq ".Actions[] | select(.Type == \"ConnectParticipantWithLexBot\") | has(\"Type\")")
         if [ -z "$lexExists" ]; then
             cat $TEMP1
         else
@@ -103,6 +117,8 @@ end
     fi
 }
 
+# AWS CLI needs to output JSON
+export AWS_DEFAULT_OUTPUT=json
 aws_connect() {
     local cmd=""
     local ii
@@ -118,16 +134,34 @@ aws_connect() {
     return $ret
 }
 
+## Max Queue Configs in a routing profile cannot be greater than 10
+MaxQC=10
+## Max contacts in a queue defaults to 2610 in certain cases. This can cause an error while updating queue
+MaxContacts=2610
+
 TEMPFILE=$(mktemp)
 TEMPERR=${TEMPFILE}_err
 TEMPNEW=${TEMPFILE}_new
 TEMPOLD=${TEMPFILE}_old
 TEMPA=${TEMPFILE}_A
 TEMPB=${TEMPFILE}_B
+TEMPA2=${TEMPFILE}_A2
+TEMPA3=${TEMPFILE}_A3
+TEMPA4=${TEMPFILE}_A4
 TEMP1=${TEMPFILE}_1
 TEMP2=${TEMPFILE}_2
-trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMP1 $TEMP2' EXIT
-touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMP1 $TEMP2
+trap 'rm -r -- $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3 $TEMPA4 $TEMP1 $TEMP2' EXIT
+touch $TEMPFILE $TEMPERR $TEMPNEW $TEMPOLD $TEMPA $TEMPB $TEMPA2 $TEMPA3 $TEMPA4 $TEMP1 $TEMP2
+
+## Set directories
+homedir=`pwd`
+rscdir="${homedir}/resources"
+
+## Added flow exception file to skip flows that cannot be migrated. e.g. Can contain caller-id setting of claimed number from source account
+## e.g. lambda src-function-name dest-function-name
+## Setting default flow execptions file - if phone mapping was configured then helper.var will override variable with "flowExceptions_phone"
+flowExceptions="${rscdir}/flowExceptions"
+phoneMapping="${rscdir}/flowExceptions_phone"
 
 actionLead="# Action -"
 dryrun=
@@ -136,6 +170,7 @@ while getopts "?dev" arg; do
     case "$arg" in
     d)  dryrun=on; echo "Dry Run";;
     e)  ignore_improper_extended_ascii=on;;
+    # C)  jq_compact_flag=" -c";;
     v)  version;;
     *)  usage;;
     esac
@@ -165,7 +200,7 @@ if [ -z "$helper" ]; then
     usage
 fi
 
-for ext in var sed new old; do
+for ext in var sed new old del skip; do
     eval helper_$ext="$helper/helper.$ext"
 done
 
@@ -176,6 +211,7 @@ fi
 . "$helper_var"
 profile=$aws_profile_b
 profile_flag=${profile:+ --profile $profile}
+account_b=$aws_ac_b
 
 cat <<EOD
 Instance Alias A: $instance_alias_a (in directory "$instance_alias_dir_a")
@@ -217,6 +253,21 @@ if [ -n "$dryrun" ]; then
 #
 EOD
 fi
+
+if [ -z "$dryrun" ]; then
+   read -p "Do you want to start migration from source instance ("$instance_alias_a") to destination instance ("$instance_alias_b") (yes/no): "    ans
+   if [ "$ans" != "yes" ]; then
+        echo "Exiting migration..."
+        exit 0
+   fi
+fi
+############################################################
+## Creating list of newly created resources that can be deleted from instance B
+	echo "## Newly created resources in instance B that can be removed (except queues, routingprofiles and hours of operation)" > $helper_del
+	echo "instance_${instance_alias_dir_b}|$instance_id_b" >> $helper_del
+
+## Skipped modules and flows due to hard-coded caller Id settings
+	echo "instance_${instance_alias_dir_b}|$instance_id_b" > $helper_skip
 
 ############################################################
 #
@@ -266,19 +317,31 @@ else
         hour_name=${hour_json#hour_}
         hour_name=${hour_name%.json}
         hour_name_decoded=$(path_decode "$hour_name")
+	h_desc_new=$hour_name_decoded
 
-        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json")
+        hour_id_a=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_a/$hour_json" | dos2unix)
+################
+	## Lets make sure description is not null
+	hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json" | dos2unix)
 
-        # Description cannot be blank, or the AWS CLI will fail.
-        hour_desc=$(jq -r ".HoursOfOperation.Description" "$instance_alias_dir_a/$hour_json")
-        if [ -z "$hour_desc" ]; then
-            hour_desc=$hour_name_decoded
-        fi
+	## if description does not exist then set to same as name
+	if [ "$hour_desc" = "null" -o "$hour_desc" = "" ]; then
+		## There is no description for hours - set it to default
+                cat "$instance_alias_dir_a/$hour_json" | jq --arg hour_desc_new "$h_desc_new" \
+                        ".HoursOfOperation | del(.Description) | . + { Description: \$hour_desc_new}" > "$TEMPA"
+	        cat "$TEMPA" |
+        		jq --arg iid $instance_id_b \
+          	  	"del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid}" |
+            		sed -f "$helper_sed" > "$helper/$hour_json"
 
-        cat "$instance_alias_dir_a/$hour_json" |
-        jq --arg iid $instance_id_b --arg desc "$hour_desc" \
-            ".HoursOfOperation | del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid} | . + { Description: \$desc}" |
-            sed -f "$helper_sed" > "$helper/$hour_json"
+	else
+		## Hours description exists
+	        cat "$instance_alias_dir_a/$hour_json" |
+	        	jq --arg iid $instance_id_b \
+    	       		 ".HoursOfOperation | del(.HoursOfOperationId, .HoursOfOperationArn) | . + { InstanceId: \$iid}" |
+            		sed -f "$helper_sed" > "$helper/$hour_json"
+
+	fi
 
         cat <<EOD >> "$helper_log"
 
@@ -302,13 +365,15 @@ EOD
         aws_connect create-hours-of-operation \
             --cli-input-json "file://$helper/$hour_json" \
             > "$helper/output_$hour_json" || error $LINENO
-        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json")
-
+        hour_id_b=$(jq -r ".HoursOfOperationId" "$helper/output_$hour_json" | dos2unix)
         aws_connect describe-hours-of-operation \
             --instance-id $instance_id_b \
             --hours-of-operation-id $hour_id_b \
             > "$instance_alias_dir_b/$hour_json" || error $LINENO
 
+## Creating list of newly created resources that can be deleted from instance B
+	echo "hour_${hour_name_decoded}|$hour_id_b" >> $helper_del
+##
         # Moving hour_json from helper_new to helper_old
         echo $hour_json >> "$helper_old"
         sed -e"/$hour_json/d" "$helper_new" > $TEMPFILE
@@ -349,9 +414,9 @@ else
         df=$(diff_files); echo $df; test "$df" == "same" && continue
         echo "Updating $hour_json"
 
-        hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json")
+	hour_id_b=$(jq -r ".HoursOfOperation.HoursOfOperationId" "$instance_alias_dir_b/$hour_json" | dos2unix)
         arg_flags=$(cat "$instance_alias_dir_b/$hour_json" |
-            jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId")
+		jq -r ".HoursOfOperation | \"--arg id \" + .HoursOfOperationId" | dos2unix)
         cat "$instance_alias_dir_a/$hour_json" |
         jq --arg iid $instance_id_b $arg_flags \
             ".HoursOfOperation | del(.HoursOfOperationArn, .Tags) | . + { InstanceId: \$iid, HoursOfOperationId: \$id }" \
@@ -416,13 +481,61 @@ else
         queue_name=${queue_json#queue_}
         queue_name=${queue_name%.json}
         queue_name_decoded=$(path_decode "$queue_name")
+	q_desc_new=$queue_name_decoded
 
-        queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json")
+	queue_id_a=$(jq -r ".Queue.QueueId" "$instance_alias_dir_a/$queue_json" | dos2unix)
 
-        cat "$instance_alias_dir_a/$queue_json" |
-        jq --arg instance_id $instance_id_b \
-            ".Queue | del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status) | . + { InstanceId: \$instance_id}" |
-        sed -f "$helper_sed" > "$helper/$queue_json"
+################
+	## Lets make sure queue description is not null and max contacts not equal to MaxContacts
+	queue_desc=$(jq -r ".Queue.Description" "$instance_alias_dir_a/$queue_json" | dos2unix)
+	max_contacts=$(jq -r ".Queue.MaxContacts" "$instance_alias_dir_a/$queue_json" | dos2unix)
+	if [ $max_contacts = null ]; then
+		max_contacts=0
+	fi
+
+	## Let's set flags to determine what need to be updated
+	maxc=no	# No need to update max contacts
+	qdesc=yes # Queue description exists
+	# Max contacts in a queue cannot be MaxContacts
+        if [ $max_contacts -eq $MaxContacts ]; then
+		maxc=yes
+	fi
+	if [ "$queue_desc" = "null" -o "$queue_desc" = "" ]; then
+		qdesc=no
+	fi
+
+	# Now lets check and update as appropriate
+        if [ "$maxc" = "no" -a "$qdesc" = "yes" ]; then
+                ## Max contacts in a queue is good and queue description exist
+	        cat "$instance_alias_dir_a/$queue_json" |
+        		jq --arg instance_id $instance_id_b \
+           		 ".Queue | del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status) | . + { InstanceId: \$instance_id}" |
+       		 sed -f "$helper_sed" > "$helper/$queue_json"
+	elif [ "$maxc" = "no" -a "$qdesc" = "no" ]; then
+		## Max contacts in a queue is good but queue description does not exist
+                ## Set queue description to same as queue name
+                cat "$instance_alias_dir_a/$queue_json" | jq --arg queue_desc_new "$q_desc_new" \
+                        ".Queue | del(.Description) | . + { Description: \$queue_desc_new}" > "$TEMPA"
+                cat "$TEMPA" | jq --arg instance_id $instance_id_b \
+                        "del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status) | . + { InstanceId: \$instance_id}" |
+      	 		 sed -f "$helper_sed" > "$helper/$queue_json"
+	elif [ "$maxc" = "yes" -a "$qdesc" = "yes" ]; then
+                ## Max contacts in a queue is NOT good and queue description exist
+		## Remove Max contacts
+	        cat "$instance_alias_dir_a/$queue_json" |
+        		jq --arg instance_id $instance_id_b \
+           		 ".Queue | del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status, .MaxContacts) | . + { InstanceId: \$instance_id}" |
+       		 sed -f "$helper_sed" > "$helper/$queue_json"
+	else
+		## Max contacts in a queue is NOT good and queue description does not exist
+		## Remove Max contacts and Set queue description to same as queue name
+                cat "$instance_alias_dir_a/$queue_json" | jq --arg queue_desc_new "$q_desc_new" \
+                        ".Queue | del(.Description) | . + { Description: \$queue_desc_new}" > "$TEMPA"
+                cat "$TEMPA" | jq --arg instance_id $instance_id_b \
+                        "del(.QueueId, .QueueArn, .OutboundCallerConfig, .Status, .MaxContacts) | . + { InstanceId: \$instance_id}" |
+      	 		 sed -f "$helper_sed" > "$helper/$queue_json"
+        fi
+################
 
         cat <<EOD >> "$helper_log"
 
@@ -446,12 +559,26 @@ EOD
         aws_connect create-queue \
             --cli-input-json "file://$helper/$queue_json" \
             > "$helper/output_$queue_json" || error $LINENO
-        queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json")
+	queue_id_b=$(jq -r ".QueueId" "$helper/output_$queue_json" | dos2unix)
 
         aws_connect describe-queue \
             --instance-id $instance_id_b \
             --queue-id $queue_id_b \
             > "$instance_alias_dir_b/$queue_json" || error $LINENO
+
+	## There will not be any quick-connects associated with the newly created queue. Create an empty file for later comparison
+## 	aws_connect list-queue-quick-connects \
+##        	--instance-id $instance_id_b \
+##        	--queue-id $queue_id_b \
+##        	> "$instance_alias_dir_b/queue_qc_$queue_name_decoded.json" || error $LINENO
+
+	echo '{
+    "QuickConnectSummaryList": []
+}'         	> "$instance_alias_dir_b/queue_qc_$queue_name.json"
+
+## Creating list of newly created resources that can be deleted from instance B
+	echo "queue_${queue_name_decoded}|$queue_id_b" >> $helper_del
+###############
 
         # Moving queue_json from helper_new to helper_old
         echo $queue_json >> "$helper_old"
@@ -475,24 +602,60 @@ EOD
     fi
 fi
 
+## Load helper_old so that we can check if queues in destination instance need update of hours of operation
+egrep "^queue_" "$helper_old" > $TEMPOLD
 if [ ! -s $TEMPOLD ]; then
     echo "No queues to update"
 else
     num_queues=$(echo $(cat $TEMPOLD | wc -l))
-    echo -e "\nChecking $num_queues queues for an update"
+    echo -e "\nChecking $num_queues queues for hours of operations update"
     ii=0
     sort $TEMPOLD |
     while read queue_json; do
         ii=$[ii+1]
         echo -n "$ii. $queue_json ... "
-        cat "$instance_alias_dir_a/$queue_json" |
-        jq "del(.Queue.OutboundCallerConfig)" > $TEMPA
-        cat "$instance_alias_dir_b/$queue_json" > $TEMPB
+        queue_name=${queue_json#queue_}
+        queue_name=${queue_name%.json}
+        queue_name_decoded=$(path_decode "$queue_name")
+
+        hours_of_operations_id_a=$(jq -r ".Queue.HoursOfOperationId" "$instance_alias_dir_a/$queue_json" | dos2unix)
+        hours_of_operations_id_b=$(jq -r ".Queue.HoursOfOperationId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        echo $hours_of_operations_id_a > $TEMPA
+        echo $hours_of_operations_id_b > $TEMPB
         df=$(diff_files); echo $df; test "$df" == "same" && continue
-        echo "Please update $queue_json manually considering potential operation impact."
+
+        ## We have to update Queue hours of operations
+    	queue_id_b=$(jq -r ".Queue.QueueId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        echo '{
+                "InstanceId": ''"'$instance_id_b'",
+                "QueueId" : ''"'$queue_id_b'",
+                "HoursOfOperationId": ''"'$hours_of_operations_id_a'"
+            }' | sed -f "$helper_sed" > "$helper/queue_hours_$queue_name.json"
+
+        cat <<EOD >> "$helper_log"
+
+        $actionLead Update Queue hours of operations: $queue_name_decoded
+EOD
+        if [ -n "$dryrun" ]; then
+            cat <<EOD
+Dry-update Queue hours of operation
+$(cat "$helper/queue_hours_$queue_name.json")
+
+EOD
+            cat <<EOD >> "$helper_log"
+aws connect update-queue-hours-of-operation \
+--cli-input-json "file://$helper/queue_hours_$queue_name.json" \
+> "$helper/output_queue_hours_$queue_name.json"
+EOD
+            continue
+        fi
+
+        aws_connect update-queue-hours-of-operation \
+            --cli-input-json "file://$helper/queue_hours_$queue_name.json" \
+            > "$helper/output_queue_hours_$queue_name.json" || error $LINENO
+
     done
 fi
-
 
 ############################################################
 #
@@ -503,11 +666,23 @@ gen_helper_rpqr() {
     # Routing Profile Queue Reference
     routing_name=$1
     out_file="$helper/routingQRs_$routing_name.json"
-    cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
-    jq ".RoutingProfileQueueConfigSummaryList[] |
-        { QueueReference: { QueueId, Channel }, Priority, Delay }" \
-    > "$out_file"
-    echo "$out_file"
+## If queue config in a routing profile exceeds count of 10 then it cannot be updated
+    rpqcnt=`cat "$instance_alias_dir_a/routingQs_$routing_name.json" |grep "QueueId" | wc -l`
+    if [ $rpqcnt -gt $MaxQC ]; then
+	## Queue configuration in routing profile exceeds maximum that can be used with API - take maximum (defined in variable MaxQC)
+	k=0
+	while [ $k -lt $MaxQC ]; do
+        	cat "$instance_alias_dir_a/routingQs_$routing_name.json" |  jq ".RoutingProfileQueueConfigSummaryList[$k] | { QueueReference: { QueueId, Channel }, Priority, Delay }"  >> "$out_file"
+         	k=`expr $k + 1`
+	done
+       echo "$out_file"
+    else
+       cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+       jq ".RoutingProfileQueueConfigSummaryList[] |
+           { QueueReference: { QueueId, Channel }, Priority, Delay }" \
+       > "$out_file"
+       echo "$out_file"
+    fi
 }
 
 gen_helper_routing_new() {
@@ -563,8 +738,8 @@ else
         routing_name=${routing_name%.json}
         routing_name_decoded=$(path_decode "$routing_name")
 
-        routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json")
-        routing_new_file=$(gen_helper_routing_new "$routing_name")
+	routing_id_a=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_a/$routing_json" | dos2unix)
+        routing_new_file=$(gen_helper_routing_new "$routing_name" | dos2unix)
         out_file="$helper/output_routing_new_$routing_name.json"
 
         cat <<EOD >> "$helper_log"
@@ -589,7 +764,7 @@ EOD
         aws_connect create-routing-profile \
             --cli-input-json "file://$routing_new_file" \
             > "$out_file" || error $LINENO
-        routing_id_b=$(jq -r ".RoutingProfileId" "$out_file")
+	routing_id_b=$(jq -r ".RoutingProfileId" "$out_file" | dos2unix)
 
         # All routing profiles will be updated with queues
         echo "$routing_json" >> $TEMPOLD
@@ -603,6 +778,10 @@ EOD
             --instance-id $instance_id_b \
             --routing-profile-id $routing_id_b \
             > "$instance_alias_dir_b/routingQs_$routing_name.json" || error $LINENO
+
+## Creating list of newly created resources that can be deleted from instance B
+	echo "routing_${routing_name_decoded}|$routing_id_b" >> $helper_del
+###############
 
         # Moving routing_json from helper_new to helper_old
         echo "$routing_json" >> "$helper_old"
@@ -634,6 +813,7 @@ else
     echo -e "\nChecking $num_routings routing profiles for an update"
     ii=0
     sort $TEMPOLD |
+##### While reading routing json
     while read routing_json; do
         ii=$[ii+1]
         echo -n "$ii. $routing_json ... "
@@ -662,7 +842,7 @@ else
         echo "Updating $routing_json"
 
         # routing_old_file=$(gen_helper_routing_old "$routing_name")
-        routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json")
+	routing_id_b=$(jq -r ".RoutingProfile.RoutingProfileId" "$instance_alias_dir_b/$routing_json" | dos2unix)
 
         if [ "$df_r" != "same" ]; then
             # Update Routing Profile of Instance B ahead of time
@@ -673,16 +853,15 @@ else
                 sed -f "$helper_sed" > "$instance_alias_dir_b/$routing_json"
             fi
 
-            routing_doq_b=$(cat "$instance_alias_dir_b/$routing_json" |
-                jq -r ".RoutingProfile.DefaultOutboundQueueId")
+            routing_doq_b=$(cat "$instance_alias_dir_b/$routing_json" | jq -r ".RoutingProfile.DefaultOutboundQueueId" | dos2unix)
 
             cat "$instance_alias_dir_b/$routing_json" |
-            jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" |
+            jq -r ".RoutingProfile.MediaConcurrencies[] | select(.Concurrency != 0)" | dos2unix |
             jq -s > "$helper/routingConcurrency_$routing_name.json"
 
             cat <<EOD >> "$helper_log"
 
-$actionLead Update routing profile: $routing_decoded
+$actionLead Update routing profile: $routing_name_decoded
 EOD
             if [ -n "$dryrun" ]; then
                 cat <<EOD
@@ -720,64 +899,168 @@ EOD
             fi
         fi
 
+#### Start of if queue configuration not same between source and destination routing profiles
         if [ "$df_rq" != "same" ]; then
-
             cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
-                sort -u > $TEMPA
+   ##           jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
+   ## Above is commented out as it does not work if only priority and/or delay seconds are changed
+                jq -r ".RoutingProfileQueueConfigSummaryList[]| {QueueName, Priority, Delay, Channel}" | jq -c |
+                   sort > $TEMPA
+## sort -u is an issue if other channel for same queue name is enabled; so removing "-u"
+#                sort -u > $TEMPA
+
             cat "$instance_alias_dir_b/routingQs_$routing_name.json" |
-                jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
-                sort -u > $TEMPB
-            > $TEMP1
-            diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" > $TEMP2
-            if [ -s $TEMP2 ]; then
-                cat $TEMP2 |
-                while read q_name; do
-                    # cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                    #     jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/\\\"}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
-                    sed -e's/\\"/%22/g' "$instance_alias_dir_a/routingQs_$routing_name.json" |
-                        jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"${q_name//\"/%22}}\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMP1
-                done
-                cat $TEMP1 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
+   ##             jq -r ".RoutingProfileQueueConfigSummaryList[].QueueName" |
+   ## Above is commented out as it does not work if only priority and/or delay seconds are changed
+                jq -r ".RoutingProfileQueueConfigSummaryList[]| {QueueName, Priority, Delay, Channel}" | jq -c |
+                sort > $TEMPB
+## sort -u is an issue if other channel for same queue name is enable; so removing "-u"
+#                sort -u > $TEMPB
+            > $TEMPA2
+            diff $TEMPA $TEMPB | grep "^< " | sed -e"s/^< //" | cut  -d',' -f1 | sed -e "s/{\"QueueName\"://g" | sed "s/\"//g" | sort -u |
+            tee $TEMPA3 |
+################ while start reading qconfiguration updates
+            while read q_name; do
+                > $TEMPA2
+                > $TEMPA4
+	### Following is used to associate queue to routing profile
+                cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"$q_name\") | { QueueReference: { QueueId, Channel }, Priority, Delay }" >> $TEMPA2
+	        cat $TEMPA2 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfig_$routing_name.json"
+
+	### Following is used to disassociate queue from routing profile
+                cat "$instance_alias_dir_a/routingQs_$routing_name.json" |
+                    jq -r ".RoutingProfileQueueConfigSummaryList[] | select(.QueueName == \"$q_name\") | { QueueId, Channel }" >> $TEMPA4
+	        cat $TEMPA4 | sed -f "$helper_sed" | jq -s > "$helper/routingQueueConfigDIS_$routing_name.json"
 
                 cat <<EOD >> "$helper_log"
 
 $actionLead Associate queues to routing profile: $routing_name_decoded
 EOD
-                if [ -n "$dryrun" ]; then
-                    cat <<EOD
+               if [ -n "$dryrun" ]; then
+                   cat <<EOD
 Dry-associate queues to routing profile $routing_name_decoded
-$(cat $TEMP2)
+$(cat $TEMPA3)
+$(cat $TEMPFILE)
 
 EOD
-# $(cat $TEMPFILE)
-                   cat <<EOD >> "$helper_log"
+                  cat <<EOD >> "$helper_log"
 aws connect associate-routing-profile-queues \
 --instance-id $instance_id_b \
 --routing-profile-id $routing_id_b \
 --queue-configs "file://$helper/routingQueueConfig_$routing_name.json"
 EOD
-                    # rm "$helper/routingQueueConfig_$routing_name.json"
-                else
-                    cat $TEMP2
-                    aws_connect associate-routing-profile-queues \
-                        --instance-id $instance_id_b \
-                        --routing-profile-id $routing_id_b \
-                        --queue-configs "file://$helper/routingQueueConfig_$routing_name.json" || error $LINENO
-                fi
-            fi
+                # rm "$helper/routingQueueConfig_$routing_name.json"
+               else
+	   	   ## It is not a dry run
+		   ## First we need to disassociate queue config from routing profile and then associate it.
+		   ## This is to make sure if only "Priority" and/or "Delay" parameters are changed in source then we are able to update it.
+                   aws_connect disassociate-routing-profile-queues \
+       	            --instance-id $instance_id_b \
+               	    --routing-profile-id $routing_id_b \
+                    --queue-references "file://$helper/routingQueueConfigDIS_$routing_name.json" || error $LINENO
 
-            if [ -z "$dryrun" ]; then
+                   aws_connect associate-routing-profile-queues \
+       	            --instance-id $instance_id_b \
+               	    --routing-profile-id $routing_id_b \
+                    --queue-configs "file://$helper/routingQueueConfig_$routing_name.json" || error $LINENO
+               fi   ### End of if dry run check
+
+        done   ################ end of while for updating qconfiguration
+
+	## If there was something different between source and destination instance and if we can't update
+	## e.g. routing profile exists in both instances but queue configuration is fewer in source than in destination
+	##      This can happen when someone updated the routing profile to remove a queue in source instance 
+	if [ ! -s "$TEMPA3" -a -z "$dryrun" ]; then
+		echo "Skipping this update. Please update $routing_json manually."
+		echo "$routing_json|$routing_id_b" >> $helper_skip
+
                 aws_connect list-routing-profile-queues \
                     --instance-id $instance_id_b \
                     --routing-profile-id $routing_id_b \
                     > "$instance_alias_dir_b/routingQs_$routing_name.json" || error $LINENO
-            fi
-        fi
-    done
+	fi
+     fi   #### End of if queue configuration not same between source and destination routing profiles
+    done  ##### While end reading routing json
     test $? -eq 0 || error
 fi
+### End if for routing profiles to update
 
+################ Associate Lex bot to Connect instance in destination account
+###
+# Associate what is in $helper_new
+egrep "^lex_" "$helper_new" | sort -u > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+	echo "No bots to associate"
+else
+	num_bots=$(echo $(cat $TEMPNEW | wc -l))
+	echo -e "\nAssociating $num_bots Lex bots"
+	ii=0
+	sort $TEMPNEW |
+	while read botname; do
+		ii=$[ii+1]
+		echo "$ii. $botname"
+		bot_name=${botname#lex_}
+                cnt=`echo $bot_name | grep : | wc -l`
+                if [ "$cnt" == "1" ]; then
+                        ## This is Lex V2 bot
+			lexversion=v2
+                        botnameV2=`echo $bot_name | cut -f1 -d':'`
+                        botaliasV2=`echo $bot_name | cut -f2 -d':'`
+			## Get bot-Id of this V2 bot
+			v2botid=`aws lexv2-models list-bots --profile $aws_profile_b | jq -r ".botSummaries[] | select(.botName == \"$botnameV2\") | { botId }" | jq -r ".botId"`
+			## now get alias-id using botid
+			v2aliasid=`aws lexv2-models list-bot-aliases --profile $aws_profile_b --bot-id $v2botid | jq -r ".botAliasSummaries[] | select(.botAliasName == \"$botaliasV2\") | { botAliasId }" | jq -r ".botAliasId"`
+			## Now create bot Alias arn
+			v2aliasarn=arn:aws:lex:$region_b:$account_b:bot-alias/$v2botid/$v2aliasid
+
+			if [ -n "$dryrun" ]; then
+				cat <<EOD
+Dry-associating lambda function
+--instance-id $instance_id_b \
+--lex-v2-bot AliasArn=$v2aliasarn \
+
+EOD
+				cat <<EOD >> "$helper_log"
+ 
+aws connect associate-bot \
+--instance-id $instance_id_b \
+--lex-v2-bot AliasArn=$v2aliasarn
+EOD
+		                continue
+			fi
+                else
+                        ## This is Lex V1 bot
+			lexversion=v1
+			if [ -n "$dryrun" ]; then
+				cat <<EOD
+Dry-associating lambda function
+--instance-id $instance_id_b \
+--lex-bot Name=$bot_name,LexRegion=$region_b \
+
+EOD
+				cat <<EOD >> "$helper_log"
+
+aws connect associate-bot \
+--instance-id $instance_id_b \
+--lex-bot Name=$bot_name,LexRegion=$region_b
+EOD
+		                continue
+			fi
+                fi
+
+		## Not a dry run
+		if [ "$lexversion" = "v1" ]; then
+			aws_connect associate-bot \
+				--instance-id $instance_id_b \
+				--lex-bot Name=$bot_name,LexRegion=$region_b || error $LINENO
+		else
+			aws_connect associate-bot \
+				--instance-id $instance_id_b \
+				--lex-v2-bot AliasArn=$v2aliasarn || error $LINENO
+		fi
+	done
+fi
 
 ############################################################
 #
@@ -791,9 +1074,13 @@ Contact Flow Modules Creation
 EOD
 
 # Preload as $helper_old may change
-egrep "^module_$contact_flow_prefix_encoded" "$helper_old" > $TEMPOLD
+## Commenting out below egrep and adding one below. Only searching with "modules_"
+##egrep "^module_$contact_flow_prefix" "$helper_old" > $TEMPOLD
+egrep "^module_" "$helper_old" > $TEMPOLD
 # Create what is in $helper_new
-egrep "^module_$contact_flow_prefix_encoded" "$helper_new" > $TEMPNEW
+## Commenting out below egrep and adding one below. Only searching with "modules_"
+#egrep "^module_$contact_flow_prefix" "$helper_new" > $TEMPNEW
+egrep "^module_" "$helper_new" > $TEMPNEW
 if [ ! -s $TEMPNEW ]; then
     echo "No contact flow modules$contact_flow_prefix_text to create"
 else
@@ -808,17 +1095,15 @@ else
         module_name=${module_name%.json}
         module_name_decoded=$(path_decode "$module_name")
 
-        # module_id_a=$(jq -r "select(.Name == \"${module_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/modules.json")
-        module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
-        out_file="$helper/output_$module_json"
+        ## module_id_a=$(jq -r "select(.Name == \"$module_name_decoded\") | .Id" "$instance_alias_dir_a/modules.json")
+	module_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id" | dos2unix)
+       out_file="$helper/output_$module_json"
 
         # Contact Flow Module template file
         # module_template_file=$helper/module_template.json
 
         cat "$instance_alias_dir_a/$module_json" |
-        sed -f "$helper_sed" |
-        sub_lex_bot \
-        > "$helper/$module_json"
+        sed -f "$helper_sed" > "$helper/$module_json"
 
         cat <<EOD >> "$helper_log"
 
@@ -828,13 +1113,13 @@ EOD
             cat <<EOD
 Dry-create contact flow module
 --instance-id $instance_id_b
---name "${module_name_decoded//\"/\\\"}"
+--name "$module_name_decoded"
 
 EOD
             cat <<EOD >> "$helper_log"
 aws connect create-contact-flow-module \
 --instance-id $instance_id_b \
---name "${module_name_decoded//\"/\\\"}" \
+--name "$module_name_decoded" \
 --content "file://$helper/$module_json" \
 > "$out_file"
 EOD
@@ -842,12 +1127,22 @@ EOD
             continue
         fi
 
+	## Get module description and use during module creation
+	md="$instance_alias_dir_a/moduledesc_${module_name}"
+	if [ -s "$md" ]; then
+		module_desc=`cat "$md"`
+	fi
+	if [ "$module_desc" = "" -o "$module_desc" = null ]; then
+		module_desc="$module_name_decoded"
+	fi
+
         aws_connect create-contact-flow-module \
             --instance-id $instance_id_b \
-            --name "${module_name_decoded//\"/\\\"}" \
+            --name "$module_name_decoded" \
+            --description "$module_desc" \
             --content "file://$helper/$module_json" \
             > "$out_file" || error $LINENO
-        module_id_b=$(jq -r ".Id" "$out_file")
+	module_id_b=$(jq -r ".Id" "$out_file" | dos2unix)
 
         # All flows will be updated with content
         # echo "$module_json" >> $TEMPOLD
@@ -858,6 +1153,10 @@ EOD
             > $TEMPFILE || error $LINENO
         cat $TEMPFILE |
         jq -r '.ContactFlowModule.Content' > "$instance_alias_dir_b/$module_json"
+
+## Creating list of newly created resources that can be deleted from instance B
+	echo "module_${module_name_decoded}|$module_id_b" >> $helper_del
+###############
 
         # Moving module_json from helper_new to helper_old
         echo "$module_json" >> "$helper_old"
@@ -903,17 +1202,23 @@ else
         module_name=${module_name%.json}
         module_name_decoded=$(path_decode "$module_name")
 
-        # module_id_b=$(jq -r "select(.Name == \"${module_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_b/modules.json")
-        module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id")
-
+ 	## we need to find exact module name match - use regular expressions ^ and $ ignoring case ("i")
+	module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name | match(\"^${module_name_decoded//\"/%22}$\";\"i\")) | .Id" | dos2unix)
+	## if module name has some exception characters, lower-case/upper-case differences, brackets, etc. and if we cannot find the id then skip instead of generating error
+	skip_module="n"
+	if [ "$module_id_b" == "" ]; then
+		module_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/modules.json" | jq -r "select(.Name == \"${module_name_decoded//\"/%22}\") | .Id" | dos2unix)
+		if [ $module_id_b == "" ]; then
+			skip_module="y"
+		fi
+	fi
+ 
         cat "$instance_alias_dir_a/$module_json" > $TEMPA
         cat "$instance_alias_dir_b/$module_json" > $TEMPB
         df=$(diff_files); echo $df; test "$df" == "same" && continue
 
         cat "$instance_alias_dir_a/$module_json" |
-        sed -f "$helper_sed" |
-        sub_lex_bot \
-        > "$helper/$module_json"
+        sed -f "$helper_sed" > "$helper/$module_json"
 
         cat <<EOD >> "$helper_log"
 
@@ -937,12 +1242,22 @@ EOD
             continue
         fi
 
-        aws_connect update-contact-flow-module-content \
-            --instance-id $instance_id_b \
-            --contact-flow-module-id $module_id_b \
-            --content "file://$helper/$module_json" \
-            > "$helper/output_content_$module_json" || error $LINENO
+############################################################################
+### Check if this is part of exception module that we have to skip updating
+### (e.g. it can contain reference to claimed number from source account
+###       set in "Set caller Id" block in outbound whisper or transfer flow
 
+	cnt=`grep -f $flowExceptions "$instance_alias_dir_a/$module_json" | wc -l`
+       	if [ $cnt -gt 0 -o "$skip_module" == "y" ]; then
+        	echo "Skipping this update as it contains an exception - Either reference to claimed number from source instance, or hard-coded Agent queue ARN. Please update this module manually in destination account."
+		echo "$module_json|$module_id_b" >> $helper_skip
+	else
+	        aws_connect update-contact-flow-module-content \
+        	    --instance-id $instance_id_b \
+            	--contact-flow-module-id $module_id_b \
+            	--content "file://$helper/$module_json" \
+            	> "$helper/output_content_$module_json" || error $LINENO
+	fi
         aws_connect describe-contact-flow-module \
             --instance-id $instance_id_b \
             --contact-flow-module-id $module_id_b \
@@ -971,9 +1286,13 @@ Contact Flows Creation
 EOD
 
 # Preload as $helper_old may change
-egrep "^flow_$contact_flow_prefix_encoded" "$helper_old" | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
+## Changing egrep to only use "flow_" Original egrep is commented out and updated on added below that
+## egrep "^flow_$contact_flow_prefix" "$helper_old" | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
+egrep "^flow_" "$helper_old" | egrep -v "^flow_Default |^flow_Sample " > $TEMPOLD
 # Create what is in $helper_new
-egrep "^flow_$contact_flow_prefix_encoded" "$helper_new" > $TEMPNEW
+## Changing egrep to only use "flow_" Original egrep is commented out and updated on added below that
+## egrep "^flow_$contact_flow_prefix" "$helper_new" > $TEMPNEW
+egrep "^flow_" "$helper_new" > $TEMPNEW
 if [ ! -s $TEMPNEW ]; then
     echo "No contact flows$contact_flow_prefix_text to create"
 else
@@ -987,10 +1306,12 @@ else
         flow_name=${flow_json#flow_}
         flow_name=${flow_name%.json}
         flow_name_decoded=$(path_decode "$flow_name")
+
         # flow_type=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .ContactFlowType" "$instance_alias_dir_a/flows.json")
-        flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType")
+	flow_type=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .ContactFlowType" | dos2unix)
         # flow_id_a=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_a/flows.json")
-        flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
+	flow_id_a=$(sed -e's/\\"/%22/g' "$instance_alias_dir_a/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id" | dos2unix)
+
         out_file="$helper/output_$flow_json"
 
         # Contact Flow template file
@@ -1022,14 +1343,14 @@ EOD
             cat <<EOD
 Dry-create contact flow from Template (Default flows)
 --instance-id $instance_id_b
---name "${flow_name_decoded//\"/\\\"}"
+--name "$flow_name_decoded"
 --type $flow_type
 
 EOD
             cat <<EOD >> "$helper_log"
 aws connect create-contact-flow \
 --instance-id $instance_id_b \
---name "${flow_name_decoded//\"/\\\"}" \
+--name "$flow_name_decoded" \
 --type $flow_type \
 --content "file://$flow_template_file" \
 > "$out_file"
@@ -1037,13 +1358,22 @@ EOD
             continue
         fi
 
+	## Get flow description and use during flow creation
+	fd="$instance_alias_dir_a/flowdesc_${flow_name_decoded}"
+	if [ -s "$fd" ]; then
+		flow_desc=`cat "$fd"`
+	fi
+	if [ "$flow_desc" = "" -o "$flow_desc" = null ]; then
+		flow_desc="$flow_name_decoded"
+	fi
         aws_connect create-contact-flow \
             --instance-id $instance_id_b \
-            --name "${flow_name_decoded//\"/\\\"}" \
+            --name "$flow_name_decoded" \
             --type $flow_type \
+            --description "$flow_desc" \
             --content "file://$flow_template_file" \
             > "$out_file" || error $LINENO
-        flow_id_b=$(jq -r ".ContactFlowId" "$out_file")
+		    flow_id_b=$(jq -r ".ContactFlowId" "$out_file" | dos2unix)
 
         # All flows will be updated with content
         echo "$flow_json" >> $TEMPOLD
@@ -1054,6 +1384,10 @@ EOD
             > $TEMPFILE || error $LINENO
         cat $TEMPFILE |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir_b/$flow_json"
+
+## Creating list of newly created resources that can be deleted from instance B
+	echo "flow_${flow_name_decoded}|$flow_id_b" >> $helper_del
+###############
 
         # Moving flow_json from helper_new to helper_old
         echo "$flow_json" >> "$helper_old"
@@ -1098,17 +1432,24 @@ else
         flow_name=${flow_json#flow_}
         flow_name=${flow_name%.json}
         flow_name_decoded=$(path_decode "$flow_name")
-        # flow_id_b=$(jq -r "select(.Name == \"${flow_name_decoded//\"/\\\"}\") | .Id" "$instance_alias_dir_b/flows.json")
-        flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id")
+
+	## we need to find exact flow name match - use regular expressions ^ and $ ignoring case ("i")
+	flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name | match(\"^${flow_name_decoded//\"/%22}$\";\"i\")) | .Id" | dos2unix)
+	## if flow name has some exception characters, lower-case/upper-case differences, brackets, etc. and if we cannot find the id then skip instead of generating error
+	skip_flow="n"
+	if [ "$flow_id_b" == "" ]; then
+		flow_id_b=$(sed -e's/\\"/%22/g' "$instance_alias_dir_b/flows.json" | jq -r "select(.Name == \"${flow_name_decoded//\"/%22}\") | .Id" | dos2unix)
+		if [ $flow_id_b == "" ]; then
+			skip_flow="y"
+		fi
+	fi
 
         cat "$instance_alias_dir_a/$flow_json" > $TEMPA
         cat "$instance_alias_dir_b/$flow_json" > $TEMPB
         df=$(diff_files); echo $df; test "$df" == "same" && continue
 
         cat "$instance_alias_dir_a/$flow_json" |
-        sed -f "$helper_sed" |
-        sub_lex_bot \
-        > "$helper/$flow_json"
+        sed -f "$helper_sed" > "$helper/$flow_json"
 
         cat <<EOD >> "$helper_log"
 
@@ -1132,12 +1473,22 @@ EOD
             continue
         fi
 
-        aws_connect update-contact-flow-content \
-            --instance-id $instance_id_b \
-            --contact-flow-id $flow_id_b \
-            --content "file://$helper/$flow_json" \
-            > "$helper/output_content_$flow_json" || error $LINENO
+############################################################################
+### Check if this is part of exception flow that we have to skip updating
+### (e.g. it can contain reference to claimed number from source account
+###       set in "Set caller Id" block in outbound whisper or transfer flow
 
+	cnt=`grep -f $flowExceptions "$instance_alias_dir_a/$flow_json" | wc -l`
+       	if [ $cnt -gt 0 -o "$skip_flow" == "y" ]; then
+        	echo "Skipping this update as it contains an exception - Either reference to claimed number from source instance, or hard-coded Agent queue ARN. Please update this flow manually in destination account."
+		echo "$flow_json|$flow_id_b" >> $helper_skip
+	else
+	      aws_connect update-contact-flow-content \
+      		      --instance-id $instance_id_b \
+      	     	 --contact-flow-id $flow_id_b \
+           	 --content "file://$helper/$flow_json" \
+          	  > "$helper/output_content_$flow_json" || error $LINENO
+	fi
         aws_connect describe-contact-flow \
             --instance-id $instance_id_b \
             --contact-flow-id $flow_id_b \
@@ -1156,9 +1507,9 @@ fi
 
 lambdaArnLead=arn:aws:lambda:$region_b:$aws_ac_b:function:
 cat \
-    "$instance_alias_dir_b/flow_${contact_flow_prefix_encoded}"* \
-    "$instance_alias_dir_b/module_${contact_flow_prefix_encoded}"* 2> /dev/null |
-    jq -r ".Actions[] | select(.Type == \"InvokeLambdaFunction\") | .Parameters.LambdaFunctionARN" |
+    "$instance_alias_dir_b/flow_"* \
+    "$instance_alias_dir_b/module_"* 2> /dev/null |
+    jq -r ".Actions[] | select(.Type == \"InvokeLambdaFunction\") | .Parameters.LambdaFunctionARN" | dos2unix |
     grep "$lambdaArnLead" |
     sort -u > $TEMPFILE
 
@@ -1166,29 +1517,24 @@ if [ -s $TEMPFILE ]; then
     echo
     echo Associating Lambda functions to $instance_alias_b
     # Use "aws connect" instead of "aws_connect" to avoid logging
-    aws connect list-lambda-functions \
-        $profile_flag \
-        --instance-id $instance_id_b \
-        > $TEMPOLD || error $LINENO
+aws connect list-lambda-functions \
+$profile_flag \
+--instance-id $instance_id_b \
+> $TEMPOLD || error $LINENO
     cat $TEMPOLD |
-    jq -r ".LambdaFunctions" > "$helper/lambdas.json"
+    jq -r ".LambdaFunctions" > "$helper/lambds.json"
 
     ii=0
     cat $TEMPFILE |
     while read lambdaArn; do
         ii=$[ii+1]
         echo -n "$ii. $lambdaArn ... "
-        lambdaExist=$(echo $(cat "$helper/lambdas.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
+        lambdaExist=$(echo $(cat "$helper/lambds.json" | jq ".[] | select(. == \"$lambdaArn\")" | wc -l))
         if [ "$lambdaExist" -gt 0 ]; then
             echo "already associated"
             continue
         fi
         echo "to be associated"
-
-        cat <<EOD >> "$helper_log"
-
-$actionLead Associate Lambda function: $lambdaArn
-EOD
         if [ -n "$dryrun" ]; then
             cat <<EOD
 Dry-associating lambda function
@@ -1211,100 +1557,416 @@ EOD
     done
 fi
 
+############################################################
+#
+# Quick Connects
+#
+
+cat <<EOD
+
+Quick Connects
+-----------------
+EOD
+
+# Preload as $helper_old may change
+egrep "^quickconnect_" "$helper_old" > $TEMPOLD
+# Create what is in $helper_new
+egrep "^quickconnect_" "$helper_new" > $TEMPNEW
+if [ ! -s $TEMPNEW ]; then
+	echo "No Quick Connects to create"
+else
+	num_qc=$(echo $(cat $TEMPNEW | wc -l))
+	echo -e "\nCreating $num_qc Quick Connects"
+	ii=0
+	sort $TEMPNEW |
+	while read qc_json; do
+		ii=$[ii+1]
+		echo "$ii. $qc_json"
+		qc_name=${qc_json#quickconnect_}
+		qc_name=${qc_name%.json}
+	        qc_name_decoded=$(path_decode "$qc_name")
+		qc_id_a=$(jq -r ".QuickConnect.QuickConnectId" "$instance_alias_dir_a/$qc_json" | dos2unix)
+		cat "$instance_alias_dir_a/$qc_json" |
+			jq --arg instance_id $instance_id_b \
+			".QuickConnect | del(.QuickConnectARN, .QuickConnectId) | . + { InstanceId: \$instance_id}" |
+			sed -f "$helper_sed" > "$helper/$qc_json"
+
+		cat <<EOD >> "$helper_log"
+$actionLead Create Quick Connect: $qc_name_decoded
+EOD
+
+		if [ -n "$dryrun" ]; then
+			cat <<EOD
+			Dry-create Quick Connect
+			$(cat "$helper/$qc_json")
+
+EOD
+            		cat <<EOD >> "$helper_log"
+aws connect create-quick-connect \
+--cli-input-json "file://$helper/$qc_json" \
+> "$helper/output_$qc_json"
+EOD
+			# rm "$helper/$qc_json"
+	                continue
+		fi
+
+############################################################################
+### Check if this is part of exception that we have to skip 
+### (e.g. quick connect is of type USER
+	    cnt=`grep -f $flowExceptions "$instance_alias_dir_a/$qc_json" | wc -l`
+       	    if [ $cnt -gt 0 ]; then
+        	echo "Skipping this quick connect as it contains an exception - May have quick connect type as USER. Please update this quick connect manually in destination account."
+		echo "$qc_json|dummyid" >> $helper_skip
+   	    else
+		aws_connect create-quick-connect \
+			--cli-input-json "file://$helper/$qc_json" \
+			> "$helper/output_$qc_json" || error $LINENO
+		qc_id_b=$(jq -r ".QuickConnectId" "$helper/output_$qc_json" | dos2unix)
+
+		aws_connect describe-quick-connect \
+			--instance-id $instance_id_b \
+			--quick-connect-id $qc_id_b \
+			> "$instance_alias_dir_b/$qc_json" || error $LINENO
+
+## Creating list of newly created resources that can be deleted from instance B
+		echo "qc_${qc_name_decoded}|$qc_id_b" >> $helper_del
+
+###############
+		# Moving qc_json from helper_new to helper_old
+		echo $qc_json >> "$helper_old"
+		sed -e"/$qc_json/d" "$helper_new" > $TEMPFILE
+		cat $TEMPFILE > "$helper_new"
+		cat <<EOD >> "$helper_sed"
+
+		# Quick Connect: $qc_name_decoded
+		s%$qc_id_a%$qc_id_b%g
+EOD
+	    fi
+    	done
+    	test $? -eq 0 || error
+
+	if [ -z "$dryrun" ]; then
+		# Update instance B quick connects
+		aws_connect list-quick-connects \
+			--instance-id $instance_id_b \
+			> $TEMPFILE || error $LINENO
+		cat $TEMPFILE |
+			jq -r ".QuickConnectSummaryList[]" > "$instance_alias_dir_b/quickconnects.json"
+	fi
+fi
+
+### Let's check if we need to update any quick connects
+if [ ! -s $TEMPOLD ]; then
+	    echo "No Quick Connects to update"
+    else
+	num_qc=$(echo $(cat $TEMPOLD | wc -l))
+        echo -e "\nChecking $num_qc Quick Connects for an update"
+	ii=0
+	sort $TEMPOLD |
+	while read qc_json; do
+        ii=$[ii+1]
+	    echo -n "$ii. $qc_json ... "
+        qc_config_json="quickconnect_config_"${qc_json#quickconnect_}
+        qc_name_json="quickconnect_name_"${qc_json#quickconnect_}
+
+        ## See if there is any update required in destination quick connect
+
+        ## Let's see if we have to update quick connect configuration
+        cat "$instance_alias_dir_a/$qc_json" |  jq ".QuickConnect | del(.QuickConnectARN, .Name, .Description, .Tags)" > $TEMPA
+        cat "$instance_alias_dir_b/$qc_json" |  jq ".QuickConnect | del(.QuickConnectARN, .Name, .Description, .Tags)" > $TEMPB
+		df=$(diff_files); echo $df; test "$df" == "same" && continue
+        ## we have to update the quick connect configuration
+        ### Check if this is part of exception that we have to skip (e.g. quick connect is of type USER)
+   	    cnt=`grep -f $flowExceptions "$instance_alias_dir_a/$qc_json" | wc -l`
+   	    if [ $cnt -gt 0 ]; then
+           	echo "Skipping this update - Quick connect type is USER. Please update this quick connect manually in destination instance"
+        	echo "$qc_json|dummyid" >> $helper_skip
+            continue
+        fi
+        cat $TEMPA | jq --arg iid $instance_id_b ". + { InstanceId: \$iid }" | sed -f "$helper_sed" > "$helper/$qc_config_json"
+  		if [ -n "$dryrun" ]; then
+    		cat <<EOD
+Dry-update quick connect configuration
+$(cat "$helper/$qc_config_json")
+EOD
+       		cat <<EOD >> "$helper_log"
+aws connect update-quick-connect-config \
+--cli-input-json "file://$helper/$qc_config_json" \
+> "$helper/output_$qc_config_json"
+EOD
+            continue
+        fi
+
+        ## Not a dry-run update quick connect configuration
+   	    aws_connect update-quick-connect-config \
+                --cli-input-json "file://$helper/$qc_config_json" \
+                > "$helper/output_$qc_config_json" || error $LINENO
+
+	done
+    test $? -eq 0 || error
+fi
 
 ############################################################
 #
-# Contact flows and modules association with Lex bots
+# Update Queue - Outbound Config
+#   If we have phone mapping then we will update phone number from instance b
+#   else we will only update outbound whisper flow in the queue
 #
-instance_alias_dir_to_discover=$instance_alias_dir_b
-if [ -n "$dryrun" ]; then
-    instance_alias_dir_to_discover=$instance_alias_dir_a
+#
+cat <<EOD
+
+Queues - Outbound caller configuration
+------
+EOD
+
+# Preload as $helper_old may change
+egrep "^queue_" "$helper_old" > $TEMPOLD
+if [ ! -s $TEMPOLD ]; then
+    echo "No queues to update for outbound caller configuration"
+else
+    num_queues=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_queues queues for outbound caller configuration"
+    ii=0
+    sort $TEMPOLD |
+    while read queue_json; do
+        outboundconfig=n
+        ii=$[ii+1]
+        queue_outboundcaller_json="queue_outboundcaller_"${queue_json#queue_}
+        echo -n "$ii. $queue_outboundcaller_json ... "
+        ## Let's extract outbound caller Id number Id and whisper flow Id - These will be used to ensure target is updated correctly
+        ## We need to take care of many variations here
+        ### e.g. Both, caller Id and whisper flow id exists in source but not in destination
+        #######  only caller Id exists in source but not in destination
+        #######  only whisper id exists in source but not in destination
+        #######  And vice-a versa like caller Id and whisper flow id does not exist in source but exist in destination (it was deleted in source after initial sync to destination)
+        ######   caller Id exists in source but whisper id exists in dest; whisper Id exists in source but caller id in dest and so forth.....
+
+        outboundCallerId_a=$(jq -r ".Queue.OutboundCallerConfig.OutboundCallerIdNumberId" "$instance_alias_dir_a/$queue_json" | dos2unix)
+        outboundWhisperFlow_a=$(jq -r ".Queue.OutboundCallerConfig.OutboundFlowId" "$instance_alias_dir_a/$queue_json" | dos2unix)
+        outboundWhisperFlow_b=$(jq -r ".Queue.OutboundCallerConfig.OutboundFlowId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        outboundCallerId_b=$(jq -r ".Queue.OutboundCallerConfig.OutboundCallerIdNumberId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+        ## If we have phone mapping then leave the outbound caller Id number Id in it else remove it
+        if [ "$flowExceptions" = "$phoneMapping" ]; then
+            ## we have phone mapping, so leave the outbound caller Id number Id
+            cat "$instance_alias_dir_a/$queue_json" | jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags)" > $TEMPA
+            cat "$instance_alias_dir_b/$queue_json" | jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags)" > $TEMPB
+            df=$(diff_files); echo $df; test "$df" == "same" && continue
+
+            ## There is some difference between source queue and destination queue for outbound configuration
+            outboundconfig=y
+            ## Let's check if we had data for outbound caller Id number Id and whisper flow Id from the queue of source instance
+            if [ "$outboundCallerId_a" = "null" -a "$outboundWhisperFlow_a" = "null" ]; then
+                ## This can happen if both, caller Id and whisper flow, are deleted from the queue of source instance - we will have to remove it from dest instance
+                cat $TEMPA | jq '. + { "OutboundCallerConfig": {} }' > $TEMPB
+                cat $TEMPB > $TEMPA
+            fi
+        else
+            ## we do not have phone mapping, so remove the outbound caller Id number Id (only caller Id name and outbound whisper flow Id will be updated)
+            ## But first lets' check if we have outbound caller Id number Id - if it exists we have to note this as manual update
+            if [ "$outboundCallerId_a" != "null" ]; then
+                ## phone mapping is not configured and queue contains outbound caller id number - so this will be a manual update for outbound caller id number
+                echo "Queue contains outbound caller id number...you may have to update corresponding outbound caller id number manually in destination queue"
+                echo "$queue_json|queue_outboundcaller" >> $helper_skip
+            fi
+
+            if [ "$outboundCallerId_a" = "null" -a "$outboundCallerId_b" != "null" ]; then
+                echo "Outbound caller Id was removed from source queue...you may have to remove corresponding outbound caller id number manually in destination queue"
+                echo "$queue_json|queue_outboundcaller" >> $helper_skip
+            fi
+
+            ## If whisper flow is different in source/destination then We will still update the outbound whisper flow Id in destination but remove outbound caller id number id
+            cat "$instance_alias_dir_a/$queue_json" | 
+            jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags, .OutboundCallerConfig.OutboundCallerIdNumberId)" > $TEMPA
+            cat "$instance_alias_dir_b/$queue_json" | 
+            jq ".Queue | del(.Name, .QueueArn, .Description, .HoursOfOperationId, .Status, .MaxContacts, .Tags, .OutboundCallerConfig.OutboundCallerIdNumberId)" > $TEMPB
+            df=$(diff_files); echo $df; test "$df" == "same" && continue
+            if [ "$outboundWhisperFlow_a" = "null" -a "$outboundWhisperFlow_b" = "null" ]; then
+                continue
+            fi
+
+            ## There is some difference between source queue and destination queue for outbound configuration
+            outboundconfig=y
+            ## We have to update dest instance, but first lets' check if we have outbound whisper flow configured in this queue in source instance
+            ## This can happen if outbound whisper flow was deleted from the queue of source instance - we will have to remove it from dest instance
+            if [ "$outboundWhisperFlow_a" = "null" ]; then
+                cat $TEMPA | jq '. + { "OutboundCallerConfig": {} }' > $TEMPB
+                cat $TEMPB > $TEMPA
+            fi
+        fi
+
+        ## If we don't have any update then continue
+        test "$outboundconfig" == "n" && continue
+
+	    ## We need to update outbound caller configuration and/or outbound whisper flow to this queue
+        cat "$TEMPA" | jq --arg instance_id $instance_id_b ". + { InstanceId: \$instance_id}" | sed -f "$helper_sed" > "$helper/$queue_outboundcaller_json"
+
+		if [ -n "$dryrun" ]; then
+			cat <<EOD
+			Dry-update Queue outbound configuration
+			$(cat "$helper/$queue_outboundcaller_json")
+EOD
+            		cat <<EOD >> "$helper_log"
+aws connect update-queue-outbound-caller-config \
+--cli-input-json "file://$helper/$queue_outboundcaller_json" \
+> "$helper/output_$queue_outboundcaller_json"
+EOD
+            continue
+		fi
+
+	    aws_connect update-queue-outbound-caller-config \
+            --cli-input-json "file://$helper/$queue_outboundcaller_json" \
+            > "$helper/output_$queue_hours_json" || error $LINENO
+    done
 fi
 
-cat \
-    "$instance_alias_dir_to_discover/flow_${contact_flow_prefix_encoded}"* \
-    "$instance_alias_dir_to_discover/module_${contact_flow_prefix_encoded}"* 2> /dev/null |
-    jq -r ".Actions[] |
-select(.Type == \"ConnectParticipantWithLexBot\") |
-.Parameters.LexBot |
-select(. != null) |
-\"Name=\" + .Name + \",LexRegion=\" + .Region" |
-    sort -u > $TEMPFILE
+############################################################
+#
+# Associate Quick Connects to Queues
+#
+#
+cat <<EOD
 
-if [ -s $TEMPFILE ]; then
-    echo
-    echo "Associating Lex bots (Classic) to $instance_alias_b"
-    cat $TEMPFILE
-    # Use "aws connect" instead of "aws_connect" to avoid logging
-    aws connect list-lex-bots \
-        $profile_flag \
-        --instance-id $instance_id_b \
-        > $TEMPOLD || error $LINENO
-    cat $TEMPOLD |
-    jq -r ".LexBots" > "$helper/lex-bots.json"
-
-    ii=0
-    cat $TEMPFILE |
-    while read lexBot; do
-        ii=$[ii+1]
-        echo -n "$ii. $lexBot ... "
-        lexBotName=${lexBot%%,*}
-        lexBotName=${lexBotName#Name=}
-        lexBotExist=$(echo $(cat "$helper/lex-bots.json" | jq ".[] | select(.Name == \"$lexBotName\")" | wc -l))
-        if [ "$lexBotExist" -gt 0 ]; then
-            echo "already associated"
-            continue
-        fi
-        echo "to be associated"
-
-        cat <<EOD >> "$helper_log"
-
-$actionLead Associate Lex Bot (Classic): $lexBot
+Queues - Quick Connects
+------
 EOD
-        if [ -n "$dryrun" ]; then
-            if [ -n "$lex_bot_prefix_a" -o -n "$lex_bot_prefix_b" ]; then
-                lexBot=$(echo "$lexBot" | sed -e"s/^Name=$lex_bot_prefix_a/Name=$lex_bot_prefix_b/")
-            fi
-            cat <<EOD
-Dry-associating lex bot
---instance-id $instance_id_b \
---lex-bot $lexBot \
 
+# Preload as $helper_old may change
+egrep "^queue_" "$helper_old" > $TEMPOLD
+if [ ! -s $TEMPOLD ]; then
+    echo "No queues to update with quick connects"
+else
+    num_queues=$(echo $(cat $TEMPOLD | wc -l))
+    echo -e "\nChecking $num_queues queues for quick connect association"
+    ii=0
+    sort $TEMPOLD |
+    while read queue_json; do
+        ii=$[ii+1]
+        queue_qc_json="queue_qc_"${queue_json#queue_}
+        echo -n "$ii. $queue_qc_json ... "
+        cat "$instance_alias_dir_a/$queue_qc_json" > $TEMPA
+        cat "$instance_alias_dir_b/$queue_qc_json" > $TEMPB
+        df=$(diff_files); echo $df; test "$df" == "same" && continue
 
+		## We need to associate quick connect to this queue
+		queue_id_b=$(jq -r ".Queue.QueueId" "$instance_alias_dir_b/$queue_json" | dos2unix)
+	        cat "$instance_alias_dir_a/$queue_qc_json" | sed -f "$helper_sed" > "$helper/$queue_qc_json"
+		## Associate all quick connects to this queue but skip the quick connect type USER
+		cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType != \"USER\") | .Id" | dos2unix |
+		while read qcid; do
+        	if [ -z "$dryrun" ]; then
+		    	aws_connect associate-queue-quick-connects \
+			    	--instance-id $instance_id_b --queue-id $queue_id_b --quick-connect-ids $qcid \
+				    > $TEMPFILE || error $LINENO
+        		cnt=`cat "$helper/$queue_qc_json" | jq -r ".QuickConnectSummaryList[] | select (.QuickConnectType == \"USER\") | .Id" | dos2unix | wc -l`
+        		if [ "$cnt" -gt "0" ]; then
+        			## There is a quick connect in this queue of type USER - Mark it to update this queue manually
+		        	echo "$queue_qc_json|qQC" >> $helper_skip
+        		fi
+            else
+    			cat <<EOD
+	    		Dry-create Queue quick connect configuration
+		    	$(cat "$helper/$queue_qc_json")
 EOD
             cat <<EOD >> "$helper_log"
-
-aws connect associate-lex-bot \
---instance-id $instance_id_b \
---lex-bot $lexBot
+aws_connect associate-queue-quick-connects \
+--instance-id $instance_id_b --queue-id $queue_id_b --quick-connect-ids $qcid \
+> "$helper/output_$queue_hours_json"
 EOD
-            continue
-        fi
-        aws_connect associate-lex-bot \
-            --instance-id $instance_id_b \
-            --lex-bot $lexBot || error $LINENO
+                continue
+            fi
+		done
     done
 fi
 
 
-############################################################
-#
-# Conclusion
-#
+###########################################################################################################
+### Let's check if we skipped to update any resources
+## Check if we skipped routing profile update
+cat <<EOD >> "$helper_log"
+******************* Possible actions in destination instance *******************
+******************* Please check these resources in destination instance *******************
+EOD
 
+echo
+echo
+echo
+echo "******************* Possible actions in destination instance *******************"
+echo "******************* Please check these resources in destination instance *******************"
+for resource in hour queue routing module flow quickconnect; do
+	case "$resource" in
+   	"hour")
+      	   rsc_desc="Hours of operation"
+ 	   ;;
+   	"queue")
+      	   rsc_desc="Queues"
+ 	   ;;
+   	"routing")
+      	   rsc_desc="Routing profiles"
+ 	   ;;
+   	"module")
+      	   rsc_desc="Contact Module"
+ 	   ;;
+   	"flow")
+      	   rsc_desc="Contact flows"
+ 	   ;;
+   	"quickconnect")
+      	   rsc_desc="Quick connects"
+ 	   ;;
+	esac
+
+        > $TEMPNEW
+        egrep "^${resource}_" "$helper_skip" > $TEMPNEW
+        if [ -s $TEMPNEW ]; then
+            num_hours=$(echo $(cat $TEMPNEW | wc -l))
+cat <<EOD >> "$helper_log"
+            Skipped $num_hours "$rsc_desc" for create/update
+EOD
+            echo -e "\nSkipped $num_hours "$rsc_desc" for create/update"
+            ii=0
+            sort $TEMPNEW |
+            while read line1; do
+                ii=$[ii+1]
+                resource_json=`echo $line1 | cut -d'|' -f1`
+                resource_id=`echo $line1 | cut -d'|' -f2`
+                resource_name=${resource_json#${resource}_}
+                resource_name=${resource_name%.json}
+		if [ "$resource_id" == "qQC" ]; then
+	                resource_name=${resource_name#qc_}
+cat <<EOD >> "$helper_log"
+	                $ii. Quick connects in queue: $resource_name
+EOD
+	                echo "$ii. Quick connects in queue: $resource_name"
+		else
+cat <<EOD >> "$helper_log"
+	                $ii. $resource_name
+EOD
+	                echo "$ii. $resource_name"
+		fi
+            done
+        fi
+done
+cat <<EOD >> "$helper_log"
+*********************************************
+EOD
+echo "*********************************************"
+
+##############################################
 num_actions=$(echo $(egrep "^$actionLead" "$helper_log" | wc -l))
 echo
-echo "$num_actions actions on the target instance"
+#echo "$num_actions actions on the target instance"
 if [ "$num_actions" -eq 0 ]; then
     echo "Target instance is the same as the source instance. No updates are required."
     exit 3
 else
     echo
-    echo "The AWS CLI commands carrying out such actions can be found in: $helper_log"
-    echo
+##    cat "$helper_log"
+##    echo
     if [ -n "$dryrun" ]; then
         echo "No actions were carried out in Dry-run mode"
     else
+cat <<EOD >> "$helper_log"
+        All done
+EOD
         echo "All done"
     fi
 fi

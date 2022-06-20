@@ -4,9 +4,19 @@
 #
 # Get a list of components of an Amazon Connect instance
 #
-
-VERSION=1.1
+# Added support to pass multiple Contact Flow names using pipe delimiter
+#	e.g. ac_save -s instance-1 profile1 "flow-1|flow-2|flow-3"
+#
+# Added support to associate Lex bot to destination connect instance
+# 
+# Added support to migrate Quick Connects
+#
+############################################################
+VERSION=1.2.2b
 SCRIPT_VERSION="$(basename $0) $VERSION"
+
+# Usage: connect_save [-?fseCv] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
+#     -C                      Produce compact contact flow/module JSON files (useful if those files exceed the API size limit)
 
 USAGE=$(cat <<EOD
 Usage: connect_save [-?fsev] [-p aws_profile] [-c contact_flow_prefix] [-G ignore_prefix] instance_alias
@@ -25,6 +35,7 @@ EOD
 )
 usage() { echo -e "$USAGE" >&2; exit 2; }
 version() { echo -e "$SCRIPT_VERSION"; exit; }
+dos2unix() { tr -d '\r'; }
 
 error() {
     if [ "$#" -ne 0 ]; then
@@ -61,7 +72,17 @@ EOD
     exit 1
 }
 
-hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
+hex_cmd=
+if [ -x "$(command -v xxd)" ]; then
+  hex_cmd="xxd -u -p -c1"
+elif [ -x "$(command -v hexdump)" ]; then
+  hex_cmd="hexdump -v -e '/1 \"%02X\n\"'"
+elif [ -x "$(command -v od)" ]; then
+  hex_cmd="od -An -vtx1 | tr [:lower:] [:upper:] | for i in \$(cat); do echo \$i; done"
+fi
+test -z "$hex_cmd" && error "Cannot find any hex conversion commands. Please install one of these: xxd, hexdump, od"
+hex_code() { printf '%s' "$1" | eval "$hex_cmd" | while read x; do printf "%%%s" "$x"; done }
+# hex_code() { printf '%s' "$1" | xxd -u -p -c1 | while read x; do printf "%%%s" "$x"; done }
 
 path_encode()  {
     old_lc_collate=$LC_COLLATE
@@ -77,6 +98,8 @@ path_encode()  {
     LC_COLLATE=$old_lc_collate
 }
 
+# AWS CLI needs to output JSON
+export AWS_DEFAULT_OUTPUT=json
 aws_connect() {
     local cmd=""
     local ii
@@ -107,11 +130,14 @@ ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
+# jq_compact_flag=
+# while getopts "?fseCvp:c:G:" arg; do
 while getopts "?fsevp:c:G:" arg; do
     case "$arg" in
     f)  forced=on;;
     s)  skip_cf_errors=on;;
     e)  ignore_improper_extended_ascii=on;;
+    # C)  jq_compact_flag=" -c";;
     v)  version;;
     p)  profile=$OPTARG;;
     c)  contact_flow_prefix=$OPTARG;;
@@ -195,7 +221,9 @@ aws_connect list-instances --max-items $maxitems > $TEMPFILE || error $LINENO
 instance_id=$(cat $TEMPFILE |
 jq -r ".InstanceSummaryList[] | select(.InstanceAlias == \"$instance_alias\")" |
 tee "$instance_alias_dir/instance.json" |
-jq -r ".Id")
+jq -r ".Id" |
+dos2unix)
+
 echo "Instance ID: $instance_id"
 
 test -n "$instance_id" || error "Instance $instance_alias does not exist"
@@ -241,6 +269,7 @@ tee "$instance_alias_dir/hours.json" |
 echo -e "\n$(jq -s "length") hours of operations listed in \"$instance_alias_dir/hours.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/hours.json" |
+dos2unix |
 while read hour_id hour_name; do
     echo "Exporting hours of operation $hour_name"
     hour_name_encoded=$(path_encode "$hour_name")
@@ -269,6 +298,7 @@ tee "$instance_alias_dir/queues.json" |
 echo -e "\n$(jq -s "length") queues listed in \"$instance_alias_dir/queues.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/queues.json" |
+dos2unix |
 while read queue_id queue_name; do
     echo "Exporting queue $queue_name"
     queue_name_encoded=$(path_encode "$queue_name")
@@ -276,6 +306,12 @@ while read queue_id queue_name; do
         --instance-id $instance_id \
         --queue-id $queue_id \
         > "$instance_alias_dir/queue_$queue_name_encoded.json" || error $LINENO
+	
+	## List quick connects associated with the queue
+    aws_connect list-queue-quick-connects \
+        --instance-id $instance_id \
+        --queue-id $queue_id \
+        > "$instance_alias_dir/queue_qc_$queue_name_encoded.json" || error $LINENO
 done
 test $? -eq 0 || error
 
@@ -297,6 +333,7 @@ tee "$instance_alias_dir/routings.json" |
 echo -e "\n$(jq -s "length") routing profiles listed in \"$instance_alias_dir/routings.json\"$jq_prefix_filter_text"
 
 jq -r ".Id + \" \" + .Name" "$instance_alias_dir/routings.json" |
+dos2unix |
 while read routing_id routing_name; do
     echo "Exporting routing profile $routing_name"
     routing_name_encoded=$(path_encode "$routing_name")
@@ -337,6 +374,7 @@ echo -e "\n$(jq -s "length") contact flow modules listed in \"$instance_alias_di
 
 cat "$instance_alias_dir/modules.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
+dos2unix |
 while read module_id module_name; do
     echo "Exporting contact flow module $module_name"
     module_name_encoded=$(path_encode "$module_name")
@@ -347,7 +385,7 @@ while read module_id module_name; do
     if [ -s $TEMPCF ]; then
         # Status == "saved" is considered a failure,
         # not to copy an unpublished contact flow module
-        cf_status=$(jq -r ".ContactFlowModule.Status" $TEMPCF)
+        cf_status=$(jq -r ".ContactFlowModule.Status" $TEMPCF | dos2unix)
         if [ "$cf_status" != "published" ]; then
             echo
             echo "$module_name: Contact flow module not published"
@@ -357,7 +395,9 @@ while read module_id module_name; do
         if [ -s $TEMPCF ]; then
             cat $TEMPCF |
             jq -r '.ContactFlowModule.Content' > "$instance_alias_dir/module_$module_name_encoded.json"
-            # fix_module_json "$instance_alias_dir/module_$module_name_encoded.json"
+	    cat $TEMPCF |
+            jq -r '.ContactFlowModule.Description' > "$instance_alias_dir/moduledesc_$module_name_encoded"
+            # fix_module_json "$instance_alias_dir/module_$module_name.json"
         fi
     fi
 done
@@ -388,19 +428,71 @@ echo -e "\n$(jq -s "length") contact flows listed in \"$instance_alias_dir/flows
 
 cat "$instance_alias_dir/flows.json" > $TEMPFILE
 jq -r ".Id + \" \" + .Name" $TEMPFILE |
+dos2unix |
 while read flow_id flow_name; do
     echo "Exporting contact flow $flow_name"
+    flow_name_encoded=$(path_encode "$flow_name")
     aws_connect describe-contact-flow \
         --instance-id $instance_id \
         --contact-flow-id $flow_id > $TEMPCF \
         || error $LINENO "$flow_name" "$instance_alias_dir/flows.json"
-    flow_name_encoded=$(path_encode "$flow_name")
     if [ -s $TEMPCF ]; then
         cat $TEMPCF |
         jq -r '.ContactFlow.Content' > "$instance_alias_dir/flow_$flow_name_encoded.json"
+        cat $TEMPCF |
+        jq -r '.ContactFlow.Description' > "$instance_alias_dir/flowdesc_$flow_name_encoded"
+
     fi
 done
 test $? -eq 0 || error
 
+############################################################
+#
+# Quick Connects
+#
+aws_connect list-quick-connects \
+	--instance-id $instance_id \
+	--max-items $maxitems \
+	> $TEMPFILE || error $LINENO
+
+cat $TEMPFILE |
+	jq -r ".QuickConnectSummaryList[]$jq_prefix_filter" |
+	jq -s "sort_by(.Name) | .[]" |
+	tee "$instance_alias_dir/quickconnects.json" |
+
+echo -e "\n$(jq -s "length") quick connects listed in \"$instance_alias_dir/quickconnects.json\"$jq_prefix_filter_text"
+
+jq -r ".Id + \" \" + .Name" "$instance_alias_dir/quickconnects.json" |
+dos2unix |
+while read qc_id qc_name; do
+    echo "Exporting quick connect $qc_name"
+    qc_name_encoded=$(path_encode "$qc_name")
+    aws_connect describe-quick-connect \
+	    --instance-id $instance_id \
+	    --quick-connect-id $qc_id \
+	    > "$instance_alias_dir/quickconnect_$qc_name_encoded.json" || error $LINENO
+done
+test $? -eq 0 || error
+
+
+############################################################
+#
+# Phone numbers
+#
+aws_connect list-phone-numbers \
+	--instance-id $instance_id \
+	--max-items $maxitems \
+	> $TEMPFILE || error $LINENO
+
+cat $TEMPFILE |
+	jq -r ".PhoneNumberSummaryList[]$jq_prefix_filter" |
+	tee "$instance_alias_dir/phonenumbers.json" |
+
+echo -e "\n$(jq -s "length") phone numbers listed in \"$instance_alias_dir/phonenumbers.json\"$jq_prefix_filter_text"
+
+test $? -eq 0 || error
+
+
+############################################################
 echo
 echo "All done"
