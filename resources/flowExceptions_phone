@@ -1,0 +1,9 @@
+## Always start comment with ## followed by space in this file
+## The flows with following JSON content cannot be migrated
+## Skip the flow if it contains set queue block with Agent queue ARN. We are not migrating Agents yet with this package and so Agent queue ARN will not exist in destination instance
+/queue/agent/
+## Skip quick connect association to queue if it contains quick connect type of USER
+"QuickConnectType": "USER"
+## skip flow with HVOC block
+"Type":"CheckOutboundCallStatus"
+#####
