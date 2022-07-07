@@ -20,7 +20,7 @@ Usage: connect_save [-?fsev] [-p aws_profile] [-c contact_flow_prefix] [-G ignor
     -p profile              AWS Profile to use
     -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
     -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
-    -C codepage             Codepage of the platform for compatibility (e.g., use '-C CP1252' for Gitbash ANSI environment)
+    -C codepage             Override the auto-detected codepage (e.g., use '-C CP1252' for Gitbash ANSI if experiencing encoding issues)
     -?                      Help
 EOD
 )
@@ -90,10 +90,11 @@ path_encode()  {
 
 # AWS CLI needs to output JSON
 export AWS_DEFAULT_OUTPUT=json
+aws_cli_encoding=UTF-8
 
 aws_cli_out_filter() {
-    if [ -n "$codepage" ]; then
-        iconv -f $codepage -t UTF-8
+    if [ -n "$codepage" -a "$codepage" != "$aws_cli_encoding" ]; then
+        iconv -f $codepage -t $aws_cli_encoding
     else
         cat
     fi
@@ -129,7 +130,10 @@ ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
-codepage=
+# codepage=${LANG##*.}
+charmap=$(eval $(locale -k LC_CTYPE | grep charmap))
+codepage=${charmap:-$aws_cli_encoding}
+codepage=${codepage##*.}
 while getopts "?fsevp:c:G:C:" arg; do
     case "$arg" in
     f)  forced=on;;
