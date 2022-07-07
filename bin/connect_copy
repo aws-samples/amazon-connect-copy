@@ -5,7 +5,7 @@
 # Copy Amazon Connect instance A to instance B safely
 #
 
-VERSION=1.2-beta1
+VERSION=1.2
 SCRIPT_VERSION="$(basename $0) $VERSION"
 
 USAGE=$(cat <<EOD

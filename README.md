@@ -1,6 +1,6 @@
 # Amazon-Connect-Copy User Guide
 
-The Amazon-Connect-Copy script copies components from the source Amazon Connect instance
+The Amazon-Connect-Copy script (v1.2) copies components from the source Amazon Connect instance
 to the target instance safely, fixing all internal references.
 
 You may use Amazon-Connect-Copy to deploy an Amazon Connect instance across environments

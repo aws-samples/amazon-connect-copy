@@ -5,7 +5,7 @@
 # Get a list of components of an Amazon Connect instance
 #
 
-VERSION=1.2-beta1
+VERSION=1.2
 SCRIPT_VERSION="$(basename $0) $VERSION"
 
 USAGE=$(cat <<EOD
@@ -131,7 +131,7 @@ ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
 # codepage=${LANG##*.}
-charmap=$(eval $(locale -k LC_CTYPE | grep charmap))
+eval $(locale -k LC_CTYPE | grep charmap)
 codepage=${charmap:-$aws_cli_encoding}
 codepage=${codepage##*.}
 while getopts "?fsevp:c:G:C:" arg; do
