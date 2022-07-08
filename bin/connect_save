@@ -20,6 +20,7 @@ Usage: connect_save [-?fsev] [-p aws_profile] [-c contact_flow_prefix] [-G ignor
     -p profile              AWS Profile to use
     -c contact_flow_prefix  Prefix of Contact Flows and Modules to be copied (all others will be ignored) - Default is to copy all
     -G ignore_prefix        Ignore hours, queues, routing profiles, flows or modules with names prefixed with ignore_prefix
+    -C codepage             Override the auto-detected codepage (e.g., use '-C CP1252' for Gitbash ANSI if experiencing encoding issues)
     -?                      Help
 EOD
 )
@@ -89,6 +90,16 @@ path_encode()  {
 
 # AWS CLI needs to output JSON
 export AWS_DEFAULT_OUTPUT=json
+aws_cli_encoding=UTF-8
+
+aws_cli_out_filter() {
+    if [ -n "$codepage" -a "$codepage" != "$aws_cli_encoding" ]; then
+        iconv -f $codepage -t $aws_cli_encoding
+    else
+        cat
+    fi
+}
+
 aws_connect() {
     local cmd=""
     local ii
@@ -96,7 +107,7 @@ aws_connect() {
         [[ "$ii" == *" "* ]] && cmd="$cmd \"$ii\"" || cmd="$cmd $ii"
     done
     echo "aws connect$profile_flag$cmd" >> "$aws_cli_log"
-    eval "aws connect$profile_flag$cmd" 2> $TEMPERR
+    eval "aws connect$profile_flag$cmd | aws_cli_out_filter" 2> $TEMPERR
     local ret=$?
     if [ -s $TEMPERR ]; then
         cat $TEMPERR | tee -a "$aws_cli_log" >&2
@@ -119,7 +130,11 @@ ignore_improper_extended_ascii=
 ignore_prefix=
 jq_prefix_filter=
 jq_prefix_filter_text=
-while getopts "?fsevp:c:G:" arg; do
+# codepage=${LANG##*.}
+eval $(locale -k LC_CTYPE | grep charmap)
+codepage=${charmap:-$aws_cli_encoding}
+codepage=${codepage##*.}
+while getopts "?fsevp:c:G:C:" arg; do
     case "$arg" in
     f)  forced=on;;
     s)  skip_cf_errors=on;;
@@ -131,6 +146,7 @@ while getopts "?fsevp:c:G:" arg; do
         jq_prefix_filter=" | select(.Name | test(\"^($ignore_prefix)\") | not)"
         jq_prefix_filter_text=" excluding those with names prefixed with \"$ignore_prefix\""
         ;;
+    C)  codepage=$OPTARG;;
     *)  usage;;
     esac
 done
